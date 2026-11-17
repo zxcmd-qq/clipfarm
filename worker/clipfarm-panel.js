@@ -344,7 +344,17 @@ async function groupMessage(env, m) {
   if (cmd && cmd[2] && name && cmd[2].toLowerCase() !== name.toLowerCase()) return;     // команда другому боту
   const c = cmd ? cmd[1].toLowerCase() : '';
   if (['clutch', 'клатч'].includes(c)) return reply(clutch(m.from));
-  if (['rate', 'оцени'].includes(c)) return reply(m.reply_to_message ? rate(m.reply_to_message.from) : 'Ответь этой командой на чьё-то сообщение — оценю 📊');
+  if (['rate', 'оцени', 'рейт'].includes(c)) {
+    // кого оцениваем: ответ на сообщение → чужой ответ из другого чата → @ник в тексте → сам автор
+    const r = m.reply_to_message;
+    const topicRoot = r && m.is_topic_message && r.message_id === m.message_thread_id;   // в группах с темами «ответ» на корень темы
+    let target = r && !topicRoot && !r.forum_topic_created ? (r.sender_chat ? { first_name: r.sender_chat.title } : r.from) : null;
+    if (!target && m.external_reply?.origin) target = m.external_reply.origin.sender_user || { first_name: m.external_reply.origin.sender_user_name || m.external_reply.origin.chat?.title };
+    const at = text.match(/@(\w{3,})/g)?.map(x => x.slice(1)).find(x => !name || x.toLowerCase() !== name.toLowerCase());
+    if (!target && at) target = { username: at };
+    if (!target) return reply(rate(m.from).replace('Этот тейк от', 'Ни на что не ответил, поэтому оцениваю тебя,'));
+    return reply(rate(target));
+  }
   if (['help', 'start', 'помощь'].includes(c)) return reply('Я ClipFarm 🎬 В группе умею:\n/clutch — сыграть клатч\n/rate — ответом на сообщение: оценю тейк\nТегни меня — отвечу.\nНастройки и баннеры — в личке со мной.');
   if (c) return;                                                      // прочие команды в группе игнорим
   const mentioned = name && text.toLowerCase().includes('@' + name.toLowerCase());
