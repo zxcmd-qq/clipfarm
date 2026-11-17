@@ -302,12 +302,68 @@ async function bannerCmd(env, owner, arg) {
   return `▶️ Баннер «${b.name}» включён — он будет посередине всех следующих клипов.\nВыключить: /banner stop`;
 }
 
+// ---------------- групповые чаты: бот молчит, но умеет пару приколов
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const who = u => u?.username ? '@' + u.username : (u?.first_name || 'боец');
+async function botName(env) {
+  let n = await env.KV.get('bot:name');
+  if (!n) { n = (await tg(env, 'getMe', {})).result?.username || ''; if (n) await env.KV.put('bot:name', n, { expirationTtl: 86400 }); }
+  return n;
+}
+function clutch(u) {
+  const n = 1 + Math.floor(Math.random() * 5), win = Math.random() < 0.42;
+  const gun = pick(['диглом', 'AWP', 'ножом', 'калашом', 'зевсом ⚡', 'скаутом', 'P90 как настоящий сильвер', 'дефьюз-китом', 'одной гранатой']);
+  const map = pick(['Mirage', 'Inferno', 'Dust 2', 'Nuke', 'Ancient', 'Anubis', 'Vertigo']);
+  return win
+    ? `🔫 ${who(u)} затащил клатч 1v${n} ${gun} на ${map}. ${pick(['Чат: W W W', 'Это ЗАВОЗИК 🔥', 'Стример плачет от зависти 😭', 'Имба, база, эйс 💀', 'Клип уже режется 🎬'])}`
+    : `💀 ${who(u)} слил клатч 1v${n} ${gun} на ${map}. ${pick(['Чат: L L L', 'Тильт обеспечен 😭', 'Тиммейты молча вышли из лобби', 'Даже бот бы затащил', 'Это попадёт в нарезку… в рубрику «кринж»'])}`;
+}
+function rate(target) {
+  const n = Math.floor(Math.random() * 11);
+  const verdict = n >= 9 ? pick(['ЭЙС 🔥', 'чистый завозик', 'база базовая', 'дабл ю']) : n >= 6 ? pick(['норм раунд', 'жиза', 'пойдёт в нарезку']) :
+    n >= 3 ? pick(['эко-раунд какой-то', 'сомнительно, но окэй', 'тильт подкрадывается']) : pick(['L', 'кринж 💀', 'сразу в отклонённые клипы ❌']);
+  return `📊 Этот тейк от ${who(target)}: ${n}/10 — ${verdict}`;
+}
+async function roast(env, text) {
+  const canned = ['Я бот для нарезок, а не психолог 💀', 'Чат, кто-нибудь, клипните это', 'Ваш тейк отправлен на модерацию в TikTok… отклонён 😭',
+    'Слишком сильно для эко-раунда', 'Записал. Если завтра будет всплеск чата — это из-за тебя', 'W тейк, L грамматика'];
+  if (!env.GEMINI_KEY || await env.KV.get('gem:cool')) return pick(canned);
+  await env.KV.put('gem:cool', '1', { expirationTtl: 60 });            // не чаще раза в минуту
+  try {
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent', {
+      method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ generationConfig: { temperature: 1.1, maxOutputTokens: 80 }, contents: [{ parts: [{ text:
+        `Ты дерзкий, но добрый бот-нарезчик стримов по CS2 в чате друзей. Ответь на сообщение одной короткой смешной фразой (до 20 слов) на сленге зумеров и CS2 (завозик, W/L, тильт, клатч, эко, имба). Без мата, без оскорблений внешности/национальности, без политики.\nСообщение: «${String(text).slice(0, 300)}»` }] }] }) }).then(r => r.json());
+    return (r.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().slice(0, 300) || pick(canned);
+  } catch (e) { return pick(canned); }
+}
+async function groupMessage(env, m) {
+  const text = (m.text || '').trim(), name = await botName(env);
+  const reply = t => tg(env, 'sendMessage', { chat_id: m.chat.id, text: t, reply_to_message_id: m.message_id });
+  const cmd = text.match(/^\/([a-zа-яё]+)(?:@(\w+))?/i);
+  if (cmd && cmd[2] && name && cmd[2].toLowerCase() !== name.toLowerCase()) return;     // команда другому боту
+  const c = cmd ? cmd[1].toLowerCase() : '';
+  if (['clutch', 'клатч'].includes(c)) return reply(clutch(m.from));
+  if (['rate', 'оцени'].includes(c)) return reply(m.reply_to_message ? rate(m.reply_to_message.from) : 'Ответь этой командой на чьё-то сообщение — оценю 📊');
+  if (['help', 'start', 'помощь'].includes(c)) return reply('Я ClipFarm 🎬 В группе умею:\n/clutch — сыграть клатч\n/rate — ответом на сообщение: оценю тейк\nТегни меня — отвечу.\nНастройки и баннеры — в личке со мной.');
+  if (c) return;                                                      // прочие команды в группе игнорим
+  const mentioned = name && text.toLowerCase().includes('@' + name.toLowerCase());
+  const repliedToMe = m.reply_to_message?.from?.username && name && m.reply_to_message.from.username.toLowerCase() === name.toLowerCase();
+  if (mentioned || repliedToMe) return reply(await roast(env, text.replace('@' + name, '').trim()));
+  // реакции на сленг — иногда
+  if (/(^|\s)(w|дабл ю|завозик|имба|эйс|ace|клатч)(\s|$|!)/i.test(text) && Math.random() < 0.3)
+    return tg(env, 'setMessageReaction', { chat_id: m.chat.id, message_id: m.message_id, reaction: [{ type: 'emoji', emoji: pick(['🔥', '🏆', '⚡', '👏']) }] });
+  if (/(^|\s)(l|тильт|кринж|слил)(\s|$|!)/i.test(text) && Math.random() < 0.3)
+    return tg(env, 'setMessageReaction', { chat_id: m.chat.id, message_id: m.message_id, reaction: [{ type: 'emoji', emoji: pick(['😭', '🤡', '💔', '🙈']) }] });
+}
+
 async function tgHook(env, req) {
   if (req.headers.get('X-Telegram-Bot-Api-Secret-Token') !== await hmac(env, 'tghook')) return new Response('no', { status: 403 });
   const u = await req.json().catch(() => ({}));
   if (u.callback_query) return clipButton(env, u.callback_query);
   const m = u.message;
   if (!m) return new Response('ok');
+  if (m.chat?.type && m.chat.type !== 'private') { try { await groupMessage(env, m); } catch (e) {} return new Response('ok'); }
   const say = text => tg(env, 'sendMessage', { chat_id: m.chat.id, text });
   const text = (m.text || '').trim();
   const p = text.match(/^\/start ([a-z0-9_]+)-([0-9a-f]{16})$/);
