@@ -383,6 +383,9 @@ def make_clip(job, args):
 def upload(final, args, peak):
     """Облако: клип -> GitHub-релиз (панель берёт его оттуда) + пинг в Telegram."""
     label = ("чат: " + ", ".join(peak))[:180] if peak else args.channel
+    if args.owner:                      # чей клип: panel показывает и постит по владельцу
+        owned = final.with_name(f"{args.owner}__{final.name}")
+        final.rename(owned); final = owned
     r = subprocess.run(["gh", "release", "upload", args.upload, f"{final}#{label}", "--clobber"],
                        capture_output=True, text=True)
     if r.returncode:
@@ -435,6 +438,7 @@ def main():
     ap.add_argument("--keep-work", action="store_true")
     ap.add_argument("--keep-rec", action="store_true", help="не удалять запись стрима после стопа")
     ap.add_argument("--font", default=os.environ.get("SUB_FONT", "Arial Black"))
+    ap.add_argument("--owner", default="", help="владелец клипов (пользователь панели)")
     ap.add_argument("--upload", default="", help="имя GitHub-релиза для заливки клипов (облако)")
     ap.add_argument("--max-hours", type=float, default=0, help="выйти через N часов (код 3, если стрим ещё идёт)")
     ap.add_argument("--offline-min", type=float, default=0, help="выйти, если стрим оффлайн N минут")
