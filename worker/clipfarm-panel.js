@@ -324,18 +324,54 @@ function rate(target) {
     n >= 3 ? pick(['эко-раунд какой-то', 'сомнительно, но окэй', 'тильт подкрадывается']) : pick(['L', 'кринж 💀', 'сразу в отклонённые клипы ❌']);
   return `📊 Этот тейк от ${who(target)}: ${n}/10 — ${verdict}`;
 }
-async function roast(env, text) {
-  const canned = ['Я бот для нарезок, а не психолог 💀', 'Чат, кто-нибудь, клипните это', 'Ваш тейк отправлен на модерацию в TikTok… отклонён 😭',
-    'Слишком сильно для эко-раунда', 'Записал. Если завтра будет всплеск чата — это из-за тебя', 'W тейк, L грамматика'];
-  if (!env.GEMINI_KEY || await env.KV.get('gem:cool')) return pick(canned);
-  await env.KV.put('gem:cool', '1', { expirationTtl: 60 });            // не чаще раза в минуту
-  try {
-    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent', {
-      method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ generationConfig: { temperature: 1.1, maxOutputTokens: 80 }, contents: [{ parts: [{ text:
-        `Ты дерзкий, но добрый бот-нарезчик стримов по CS2 в чате друзей. Ответь на сообщение одной короткой смешной фразой (до 20 слов) на сленге зумеров и CS2 (завозик, W/L, тильт, клатч, эко, имба). Без мата, без оскорблений внешности/национальности, без политики.\nСообщение: «${String(text).slice(0, 300)}»` }] }] }) }).then(r => r.json());
-    return (r.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().slice(0, 300) || pick(canned);
-  } catch (e) { return pick(canned); }
+const CANNED = ['Я бот для нарезок, а не психолог 💀', 'Чат, кто-нибудь, клипните это', 'Ваш тейк отправлен на модерацию… отклонён 😭',
+  'Слишком сильно для эко-раунда', 'Записал. Если завтра будет всплеск чата — это из-за тебя', 'W тейк, L грамматика', 'Это не клатч, это кринж 💀',
+  'Сначала пофрагай, потом поговорим', 'Тильт детектед, иди попей водички', 'Я бы это клипнул, но у меня есть стандарты', 'Чат в отлёте, я тоже',
+  'Имба мысль, но ты на эко', 'Раунд проигран, но вайб засчитан', 'Скажи это ещё раз, только с AWP в руках'];
+async function gemini(env, prompt, model) {
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+    method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ generationConfig: { temperature: 1.05, maxOutputTokens: 2048 }, contents: [{ parts: [{ text: prompt }] }] }) }).then(r => r.json());
+  // у «думающих» моделей бывает несколько частей — берём текст, не мысли
+  const parts = r.candidates?.[0]?.content?.parts || [];
+  return parts.filter(p => p.text && !p.thought).map(p => p.text).join(' ').trim();
+}
+async function roast(env, m, name) {
+  const chat = m.chat.id, key = `chat:${chat}`;
+  const hist = (await kvGet(env, key)) || [];
+  const me = who(m.from), text = (m.text || m.caption || '').replace(new RegExp('@' + name, 'ig'), '').trim();
+  const replied = m.reply_to_message && m.reply_to_message.from?.username?.toLowerCase() !== name.toLowerCase()
+    ? `${who(m.reply_to_message.from)}: ${(m.reply_to_message.text || m.reply_to_message.caption || '[медиа]').slice(0, 200)}` : '';
+  let answer = '';
+  if (env.GEMINI_KEY) {
+    const prompt = `Ты — ClipFarm, бот-нарезчик стримов по CS2, сидишь в чате друзей. Характер: дерзкий, остроумный, но добрый; говоришь как зумер-киберкотлетка.
+Правила ответа:
+- отвечай ПО СУТИ на последнее сообщение: если спросили — ответь на вопрос, если подкололи — подколи в ответ, если просят что-то — реагируй на просьбу;
+- учитывай историю разговора ниже и НЕ повторяй свои прошлые фразы и шутки;
+- 1–2 коротких предложения (до 30 слов), иногда один эмодзи;
+- сленг по ситуации, не в каждой фразе: завозик, W/L, тильт, клатч, эко, имба, база, кринж, рофл;
+- без мата, без оскорблений внешности/национальности/семьи, без политики и 18+;
+- не начинай с обращения «Ну» и не пиши своё имя.
+
+История (старые сверху):
+${hist.map(h => `${h.u}: ${h.t}`).join('\n') || '(пусто)'}
+${replied ? `\n${me} отвечает на сообщение: «${replied}»` : ''}
+Последнее сообщение — ${me}: ${text || '[без текста]'}
+Твой ответ:`;
+    for (const model of ['gemini-flash-latest', 'gemini-flash-lite-latest']) {
+      try { answer = await gemini(env, prompt, model); } catch (e) {}
+      if (answer) break;
+    }
+    answer = answer.replace(/^(ClipFarm|Бот)\s*:\s*/i, '').replace(/^["«]|["»]$/g, '').slice(0, 400);
+  }
+  if (!answer) {                                   // запасные фразы — без повторов подряд
+    const used = new Set(hist.filter(h => h.u === 'бот').map(h => h.t));
+    const fresh = CANNED.filter(x => !used.has(x));
+    answer = pick(fresh.length ? fresh : CANNED);
+  }
+  const next = [...hist, { u: me, t: text.slice(0, 200) }, { u: 'бот', t: answer.slice(0, 200) }].slice(-16);
+  await kvPut(env, key, next);
+  return answer;
 }
 async function groupMessage(env, m) {
   const text = (m.text || '').trim(), name = await botName(env);
@@ -359,7 +395,13 @@ async function groupMessage(env, m) {
   if (c) return;                                                      // прочие команды в группе игнорим
   const mentioned = name && text.toLowerCase().includes('@' + name.toLowerCase());
   const repliedToMe = m.reply_to_message?.from?.username && name && m.reply_to_message.from.username.toLowerCase() === name.toLowerCase();
-  if (mentioned || repliedToMe) return reply(await roast(env, text.replace('@' + name, '').trim()));
+  if (mentioned || repliedToMe) {
+    // на «ахах», «)))», «ок» в ответ боту не болтаем — просто реакция
+    if (!mentioned && /^(а?[хx][аaеэ]+[хx]*.*|лол|ору+|кек|lol|ok|ок|да|нет|\)+|[😂🤣💀😭👍🔥]+)$/i.test(text))
+      return tg(env, 'setMessageReaction', { chat_id: m.chat.id, message_id: m.message_id, reaction: [{ type: 'emoji', emoji: pick(['🤣', '😁', '🔥', '🗿']) }] });
+    await tg(env, 'sendChatAction', { chat_id: m.chat.id, action: 'typing' });
+    return reply(await roast(env, m, name));
+  }
   // реакции на сленг — иногда
   if (/(^|\s)(w|дабл ю|завозик|имба|эйс|ace|клатч)(\s|$|!)/i.test(text) && Math.random() < 0.3)
     return tg(env, 'setMessageReaction', { chat_id: m.chat.id, message_id: m.message_id, reaction: [{ type: 'emoji', emoji: pick(['🔥', '🏆', '⚡', '👏']) }] });
