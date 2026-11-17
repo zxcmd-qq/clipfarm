@@ -1,0 +1,73 @@
+name: ClipFarm — нарезка стрима
+run-name: "🎬 ${{ inputs.channel }} (часть ${{ inputs.part }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Ник стримера на Twitch'
+        required: true
+      model:
+        description: 'Whisper: base / small'
+        default: 'small'
+      mult:
+        description: 'Порог всплеска (во сколько раз выше нормы)'
+        default: '2.5'
+      part:
+        description: 'Номер сессии (ставится сам при продолжении)'
+        default: '1'
+
+concurrency:
+  group: clip-${{ inputs.channel }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CH: ${{ inputs.channel }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      PANEL_URL: ${{ vars.PANEL_URL }}
+      SUB_FONT: Montserrat Black
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Кэш моделей Whisper и детектора лиц
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/clipfarm
+          key: models-v1
+      - name: Установка
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-montserrat > /dev/null
+          pip install -q -r requirements.txt
+          fc-list | grep -i "montserrat" | head -2 || true
+      - name: Релиз для клипов
+        run: gh release view clips >/dev/null 2>&1 || gh release create clips -t "Клипы" -n "Сюда падают готовые нарезки. Решения — в панели."
+      - name: Нарезка (до 5,5 ч)
+        id: cut
+        run: |
+          set +e
+          python -u clipfarm.py --channel "$CH" --model "${{ inputs.model }}" --mult "${{ inputs.mult }}" \
+            --upload clips --max-hours 5.4 --offline-min 15 --quality "720p,720p60,best"
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          [ $code -eq 3 ] && exit 0 || exit $code
+      - name: Стрим ещё идёт — продолжаем новой сессией
+        if: steps.cut.outputs.code == '3'
+        run: |
+          gh workflow run clip.yml -f channel="$CH" -f model="${{ inputs.model }}" \
+            -f mult="${{ inputs.mult }}" -f part="$(( ${{ inputs.part }} + 1 ))"

@@ -1,0 +1,4 @@
+streamlink
+numpy
+opencv-python-headless
+faster-whisper
