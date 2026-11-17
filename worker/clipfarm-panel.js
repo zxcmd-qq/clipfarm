@@ -7,6 +7,7 @@
 //   YT_CLIENT_ID, YT_CLIENT_SECRET   OAuth-клиент Google (проект ClipFarm)
 //   TT_CLIENT_KEY, TT_CLIENT_SECRET  приложение TikTok
 //   GEMINI_KEY     (необязательно) — заголовки и хештеги
+//   TG_BOT_TOKEN   (необязательно) — бот ClipFarm: шлёт описание после каждой публикации
 // Привязка KV: KV  — здесь хранятся подключённые аккаунты и журнал публикаций.
 // Cron (Triggers): 5 раз в день, напр. "0 7,10,13,16,19 * * *" (UTC) — по 1 клипу каждому пользователю.
 //
@@ -81,10 +82,10 @@ const kvPut = (env, k, v) => env.KV ? env.KV.put(k, JSON.stringify(v)) : null;
 
 // ---------------------------------------------------------------- state
 async function state(env, me) {
-  const [runsR, assets, yt, tt, log] = await Promise.all([
+  const [runsR, assets, yt, tt, log, tgc] = await Promise.all([
     gh(env, `/actions/workflows/${WF}/runs?per_page=40`),
     allAssets(env),
-    kvGet(env, `acct:${me}:youtube`), kvGet(env, `acct:${me}:tiktok`), kvGet(env, `log:${me}`),
+    kvGet(env, `acct:${me}:youtube`), kvGet(env, `acct:${me}:tiktok`), kvGet(env, `log:${me}`), kvGet(env, `tg:${me}`),
   ]);
   const runs = (runsR.ok ? (await runsR.json()).workflow_runs : [])
     .filter(r => (r.display_title || '').includes(`· ${me} `) || (me === firstUser(env) && !(r.display_title || '').includes(' · ')));
@@ -99,10 +100,11 @@ async function state(env, me) {
     fresh: clips.filter(c => c.stage === 'fresh'),
     approved: clips.filter(c => c.stage === 'approved').reverse(),       // очередь: старые первыми
     posted: clips.filter(c => c.stage === 'posted').slice(0, 30),
-    accounts: { youtube: yt ? { name: yt.name } : null, tiktok: tt ? { name: tt.name } : null },
+    accounts: { youtube: yt ? { name: yt.name } : null, tiktok: tt ? { name: tt.name } : null,
+      telegram: tgc ? { name: tgc.name ? '@' + tgc.name : 'подключён' } : null },
     log: (log || []).slice(0, 30),
     kv: !!env.KV,
-    oauth: { youtube: !!(env.YT_CLIENT_ID && env.YT_CLIENT_SECRET), tiktok: !!(env.TT_CLIENT_KEY && env.TT_CLIENT_SECRET) },
+    oauth: { youtube: !!(env.YT_CLIENT_ID && env.YT_CLIENT_SECRET), tiktok: !!(env.TT_CLIENT_KEY && env.TT_CLIENT_SECRET), telegram: !!env.TG_BOT_TOKEN },
   };
 }
 
@@ -157,6 +159,46 @@ async function oauthCallback(env, prov, url) {
   const name = u.data?.user?.display_name || 'TikTok';
   await kvPut(env, `acct:${owner}:tiktok`, { refresh: t.refresh_token, open_id: t.open_id, name });
   return html(msgPage(`✅ TikTok подключён: ${name}`));
+}
+
+// ---------------------------------------------------------------- telegram
+const tg = (env, method, body) => fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/${method}`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()).catch(() => ({}));
+const tgEsc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+async function tgConnect(env, me) {
+  if (!env.TG_BOT_TOKEN) return html(msgPage('❌ В воркере нет TG_BOT_TOKEN'), 500);
+  // вебхук ставим каждый раз — это безопасно и чинит его, если сбился
+  await tg(env, 'setWebhook', { url: `${BASE}/tg/hook`, secret_token: await hmac(env, 'tghook'), allowed_updates: ['message'] });
+  const bot = await tg(env, 'getMe', {});
+  const name = bot.result?.username;
+  if (!name) return html(msgPage('❌ Telegram не принял токен бота'), 500);
+  return Response.redirect(`https://t.me/${name}?start=${me}-${(await hmac(env, 'tg:' + me)).slice(0, 16)}`, 302);
+}
+
+async function tgHook(env, req) {
+  if (req.headers.get('X-Telegram-Bot-Api-Secret-Token') !== await hmac(env, 'tghook')) return new Response('no', { status: 403 });
+  const u = await req.json().catch(() => ({}));
+  const m = u.message;
+  if (!m?.text) return new Response('ok');
+  const p = m.text.match(/^\/start ([a-z0-9_]+)-([0-9a-f]{16})$/);
+  if (p && users(env)[p[1]] && (await hmac(env, 'tg:' + p[1])).slice(0, 16) === p[2]) {
+    await kvPut(env, `tg:${p[1]}`, { chat: m.chat.id, name: m.from?.username || m.from?.first_name || '' });
+    await tg(env, 'sendMessage', { chat_id: m.chat.id, text: `✅ Готово, ${p[1]}! Сюда будут приходить описания после каждой публикации.` });
+  } else {
+    await tg(env, 'sendMessage', { chat_id: m.chat.id, text: 'Подключи бота из панели ClipFarm: «Мои аккаунты» → Telegram → Подключить.' });
+  }
+  return new Response('ok');
+}
+
+async function tgReport(env, owner, entry) {
+  const t = await kvGet(env, `tg:${owner}`);
+  if (!t || !env.TG_BOT_TOKEN) return;
+  const text_ = entry.title + ' ' + (entry.tags || []).map(x => '#' + x).join(' ');
+  const lines = Object.entries(entry.res || {}).map(([k, v]) =>
+    `${k === 'youtube' ? '▶️ YouTube' : '🎵 TikTok'}: ${String(v).startsWith('http') ? v : tgEsc(v === 'черновик' ? 'черновик во «Входящих» — вставь текст ниже' : v)}`);
+  await tg(env, 'sendMessage', { chat_id: t.chat, parse_mode: 'HTML', disable_web_page_preview: true,
+    text: `🚀 <b>Опубликовано</b> · ${tgEsc(entry.streamer || '')}\n${lines.join('\n')}\n\n📋 Текст (нажми, чтобы скопировать):\n<code>${tgEsc(text_)}</code>` });
 }
 
 // ---------------------------------------------------------------- publishing
@@ -235,9 +277,10 @@ async function publishNext(env, owner) {
   if (tt) { try { res.tiktok = await postTikTok(env, owner, tt, c); } catch (e) { res.tiktok = '⚠️ ' + e.message; } }
   const ok = Object.values(res).some(v => !String(v).startsWith('⚠️'));
   if (ok) await gh(env, `/releases/assets/${c.id}`, { method: 'PATCH', body: JSON.stringify({ name: 'done_' + c.base, label: c.label }) });
-  const entry = { t: new Date().toISOString(), clip: c.base, title: cap.title, tags: cap.tags, res };
+  const entry = { t: new Date().toISOString(), clip: c.base, streamer: c.streamer, title: cap.title, tags: cap.tags, res };
   const log = (await kvGet(env, `log:${owner}`)) || [];
   await kvPut(env, `log:${owner}`, [entry, ...log].slice(0, 50));
+  await tgReport(env, owner, entry);
   return { owner, ...entry, left: queue.length - (ok ? 1 : 0) };
 }
 
@@ -259,6 +302,7 @@ export default {
     }
     if (url.pathname === '/logout') return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': 'cf_auth=; Path=/; Max-Age=0' } });
 
+    if (url.pathname === '/tg/hook' && req.method === 'POST') return tgHook(env, req);
     const prov = url.pathname.match(/^\/oauth\/(youtube|tiktok)\/cb$/)?.[1];
     if (prov) return oauthCallback(env, prov, url);
 
@@ -275,6 +319,7 @@ export default {
       if (!env.KV) return html(msgPage('❌ У воркера нет привязки KV'), 500);
       return oauthStart(env, me, start);
     }
+    if (url.pathname === '/tg/connect') return tgConnect(env, me);
     if (url.pathname === '/api/state') return json(await state(env, me));
 
     if (req.method === 'POST') {
@@ -313,6 +358,7 @@ export default {
       if (url.pathname === '/api/publish') return json(await publishNext(env, me));
       if (url.pathname === '/api/disconnect') {
         if (['youtube', 'tiktok'].includes(b.prov) && env.KV) await env.KV.delete(`acct:${me}:${b.prov}`);
+        if (b.prov === 'telegram' && env.KV) await env.KV.delete(`tg:${me}`);
         return json({ ok: true });
       }
     }
@@ -408,8 +454,8 @@ function render(){
   $('me').textContent='👤 '+S.me;
   const acc=(p,name,ico)=>{const a=S.accounts[p];return '<div class="row"><span style="font-size:20px">'+ico+'</span><b>'+name+(a?': '+esc(a.name):'')+'</b>'+
     (a?'<span class="mut">✅ подключён</span><button onclick="disc(\\''+p+'\\')">Отключить</button>':
-     (S.oauth[p]&&S.kv?'<a class="btn go" href="/oauth/'+p+'/start">Подключить</a>':'<span class="mut">не настроено в воркере</span>'))+'</div>'};
-  $('accts').innerHTML=acc('youtube','YouTube Shorts','▶️')+acc('tiktok','TikTok (в черновики)','🎵');
+     (S.oauth[p]&&S.kv?'<a class="btn go" href="'+(p==='telegram'?'/tg/connect" target="_blank':'/oauth/'+p+'/start')+'">Подключить</a>':'<span class="mut">не настроено в воркере</span>'))+'</div>'};
+  $('accts').innerHTML=acc('youtube','YouTube Shorts','▶️')+acc('tiktok','TikTok (в черновики)','🎵')+acc('telegram','Telegram (описания)','✈️');
   $('runs').innerHTML=S.active.length?S.active.map(r=>'<div class="row '+(r.status==='in_progress'?'':'q')+'"><span class="dot"></span><b>'+esc(r.title)+'</b>'+
     '<span class="mut">'+(r.status==='in_progress'?'идёт '+ago(r.started):'запускается…')+'</span><a href="'+r.url+'" target="_blank">лог</a>'+
     '<button class="no" onclick="stopRun('+r.id+',this)">■ Стоп</button></div>').join('')
