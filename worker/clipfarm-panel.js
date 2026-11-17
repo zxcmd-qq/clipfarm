@@ -687,6 +687,72 @@ h1{font-size:28px;text-align:center;margin:0 0 6px;font-weight:700}.sub{color:va
 .group{background:var(--card);border-radius:12px;overflow:hidden;margin-bottom:16px}
 .group label{display:flex;align-items:center;min-height:48px;padding:0 16px}.group label+label{border-top:.5px solid var(--sep)}
 .group span{width:84px;color:var(--label)}.group input{flex:1}
+/* ===== Liquid Glass ===== */
+:root{--glass:rgba(255,255,255,.58);--glass2:rgba(255,255,255,.72);--rim:rgba(255,255,255,.75);--rim2:rgba(255,255,255,.18);--shadow:0 8px 32px rgba(31,38,135,.10),0 1px 2px rgba(0,0,0,.04);--blur:saturate(190%) blur(26px);
+  --ease:cubic-bezier(.2,.9,.25,1);--spring:cubic-bezier(.34,1.56,.64,1)}
+@media (prefers-color-scheme:dark){:root{--glass:rgba(40,40,46,.52);--glass2:rgba(52,52,58,.66);--rim:rgba(255,255,255,.22);--rim2:rgba(255,255,255,.04);--shadow:0 10px 40px rgba(0,0,0,.45)}}
+body{min-height:100vh}
+body::before{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;
+  background:radial-gradient(40% 35% at 15% 10%,rgba(124,92,255,.38),transparent 70%),radial-gradient(35% 30% at 90% 15%,rgba(0,170,255,.30),transparent 70%),
+  radial-gradient(40% 35% at 80% 85%,rgba(255,120,60,.26),transparent 70%),radial-gradient(35% 30% at 10% 90%,rgba(52,199,89,.20),transparent 70%),var(--bg);
+  animation:drift 28s ease-in-out infinite alternate}
+@keyframes drift{to{transform:translate3d(3%,-2%,0) rotate(4deg) scale(1.05)}}
+.group,.tile,.chart,.clip,.toast,.tip{background:var(--glass)!important;-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
+  border:1px solid var(--rim2);box-shadow:var(--shadow),inset 0 1px 0 var(--rim),inset 0 -1px 0 rgba(255,255,255,.06)}
+.group,.tile,.chart{border-radius:22px}.clip{border-radius:22px}
+.group{position:relative}
+.group::after,.tile::after,.chart::after,.clip::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:linear-gradient(135deg,rgba(255,255,255,.35),rgba(255,255,255,0) 38%,rgba(255,255,255,0) 70%,rgba(255,255,255,.12));mix-blend-mode:soft-light}
+.tile,.chart,.clip{position:relative}
+.row+.row::before{border-top-color:var(--sep)}
+/* навигация — стеклянная капсула */
+.nav{background:var(--glass2)!important;-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);border:1px solid var(--rim2)!important;
+  box-shadow:var(--shadow),inset 0 1px 0 var(--rim)}
+.nav .pill{position:absolute;z-index:0;border-radius:999px;background:var(--fill);box-shadow:inset 0 1px 0 var(--rim),0 2px 10px rgba(0,0,0,.08);
+  transition:transform .5s var(--spring),width .5s var(--spring),height .5s var(--spring)}
+.nav a{position:relative;z-index:1;transition:color .3s,transform .25s var(--spring)}.nav a:active{transform:scale(.9)}
+@media (max-width:899px){
+  .nav{left:14px;right:14px;bottom:calc(10px + env(safe-area-inset-bottom));border-radius:32px;padding:6px!important;border-top:1px solid var(--rim2)!important}
+  .nav a{padding:6px 0;border-radius:26px}
+  main{padding-bottom:calc(110px + env(safe-area-inset-bottom))!important}
+  .toast{bottom:calc(100px + env(safe-area-inset-bottom))!important}
+}
+@media (min-width:900px){
+  .nav{top:14px;bottom:14px;left:14px;width:236px;border-radius:26px;border-right:1px solid var(--rim2)!important}
+  .nav a.on{background:transparent!important;color:var(--label)!important}.nav a.on svg{color:var(--tint)!important}
+  .nav .pill{border-radius:14px;background:var(--glass2);box-shadow:var(--shadow),inset 0 1px 0 var(--rim)}
+  main{margin-left:264px!important}
+}
+/* сегменты со скользящим «стеклом» */
+.seg{position:relative;background:var(--fill);border-radius:12px;padding:3px}
+.seg .ind{position:absolute;top:3px;bottom:3px;left:0;border-radius:9px;background:var(--glass2);
+  box-shadow:0 3px 10px rgba(0,0,0,.12),inset 0 1px 0 var(--rim);transition:transform .45s var(--spring),width .45s var(--spring)}
+.seg button{position:relative;z-index:1;background:transparent!important;box-shadow:none!important;transition:color .25s,transform .2s var(--spring)}
+.seg button:active{transform:scale(.94)}
+/* кнопки — пружинка */
+.btn{transition:transform .25s var(--spring),filter .2s,box-shadow .25s;box-shadow:0 4px 14px color-mix(in srgb,var(--tint) 30%,transparent),inset 0 1px 0 rgba(255,255,255,.35)}
+.btn.gray{box-shadow:inset 0 1px 0 var(--rim);background:var(--glass2)}.btn.red{box-shadow:0 4px 14px color-mix(in srgb,var(--red) 30%,transparent),inset 0 1px 0 rgba(255,255,255,.3)}
+.btn.green{box-shadow:0 4px 14px color-mix(in srgb,var(--green) 30%,transparent),inset 0 1px 0 rgba(255,255,255,.3)}
+.btn:active{transform:scale(.95);filter:brightness(.95)}
+@media (hover:hover){.btn:hover{filter:brightness(1.07)}.clip:hover{transform:translateY(-3px)}}
+/* появление экранов и элементов */
+.enter{animation:enter .55s var(--ease) both}
+@keyframes enter{from{opacity:0;transform:translateY(14px) scale(.985);filter:blur(6px)}}
+.enter .group,.enter .tile,.enter .chart,.enter .grid>*{animation:pop .6s var(--ease) both}
+.enter>*:nth-child(2) {animation-delay:.03s}.enter>*:nth-child(3){animation-delay:.06s}.enter>*:nth-child(4){animation-delay:.09s}
+.tiles>*:nth-child(2){animation-delay:.05s!important}.tiles>*:nth-child(3){animation-delay:.1s!important}.tiles>*:nth-child(4){animation-delay:.15s!important}
+@keyframes pop{from{opacity:0;transform:translateY(10px) scale(.97)}}
+.clip{transition:transform .35s var(--spring),opacity .3s,box-shadow .3s;animation:pop .5s var(--ease) both}
+.clip.out{opacity:0;transform:scale(.85)}
+.row{transition:background .2s}a.row:active,.row:active{background:var(--fill)}
+.toast{border-radius:999px!important;transition:transform .5s var(--spring),opacity .3s!important;transform:translateX(-50%) translateY(30px) scale(.9)!important}
+.toast.on{transform:translateX(-50%) translateY(0) scale(1)!important}
+.chart path.line{stroke-dasharray:var(--len);stroke-dashoffset:var(--len);animation:draw 1.2s var(--ease) .15s forwards}
+@keyframes draw{to{stroke-dashoffset:0}}
+h1.title{animation:enter .6s var(--ease) both}
+@media (prefers-reduced-motion:reduce){*,*::before{animation:none!important;transition:none!important}}
+
+.wrap{animation:enter .7s var(--ease) both}.logo{animation:pop .8s var(--spring) both}
 </style></head><body><form class="wrap" method="post" action="/login">
 <div class="logo"><svg width="38" height="38" viewBox="0 0 24 24" fill="none"><rect x="6" y="2.5" width="12" height="15" rx="2.5" stroke="#fff" stroke-width="2"/><path d="M10.5 7.2v5.6l4.4-2.8z" fill="#fff"/><path d="M4 21.5h2M8 21.5h2M12 20v1.5M16 21.5h2" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg></div>
 <h1>ClipFarm</h1><p class="sub">Нарезки со стримов на автопилоте</p>
@@ -767,8 +833,73 @@ h1.title{font-size:34px;font-weight:700;letter-spacing:.2px;margin:10px 4px 18px
 .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
 @media (min-width:900px){.toast{bottom:30px;left:calc(50% + 125px)}}
 .hide{display:none!important}
+/* ===== Liquid Glass ===== */
+:root{--glass:rgba(255,255,255,.58);--glass2:rgba(255,255,255,.72);--rim:rgba(255,255,255,.75);--rim2:rgba(255,255,255,.18);--shadow:0 8px 32px rgba(31,38,135,.10),0 1px 2px rgba(0,0,0,.04);--blur:saturate(190%) blur(26px);
+  --ease:cubic-bezier(.2,.9,.25,1);--spring:cubic-bezier(.34,1.56,.64,1)}
+@media (prefers-color-scheme:dark){:root{--glass:rgba(40,40,46,.52);--glass2:rgba(52,52,58,.66);--rim:rgba(255,255,255,.22);--rim2:rgba(255,255,255,.04);--shadow:0 10px 40px rgba(0,0,0,.45)}}
+body{min-height:100vh;background:transparent!important}
+body::before{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;
+  background:radial-gradient(40% 35% at 15% 10%,rgba(124,92,255,.38),transparent 70%),radial-gradient(35% 30% at 90% 15%,rgba(0,170,255,.30),transparent 70%),
+  radial-gradient(40% 35% at 80% 85%,rgba(255,120,60,.26),transparent 70%),radial-gradient(35% 30% at 10% 90%,rgba(52,199,89,.20),transparent 70%),var(--bg);
+  animation:drift 28s ease-in-out infinite alternate}
+@keyframes drift{to{transform:translate3d(3%,-2%,0) rotate(4deg) scale(1.05)}}
+.group,.tile,.chart,.clip,.toast,.tip{background:var(--glass)!important;-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
+  border:1px solid var(--rim2);box-shadow:var(--shadow),inset 0 1px 0 var(--rim),inset 0 -1px 0 rgba(255,255,255,.06)}
+.group,.tile,.chart{border-radius:22px}.clip{border-radius:22px}
+.group{position:relative}
+.group::after,.tile::after,.chart::after,.clip::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:linear-gradient(135deg,rgba(255,255,255,.35),rgba(255,255,255,0) 38%,rgba(255,255,255,0) 70%,rgba(255,255,255,.12));mix-blend-mode:soft-light}
+.tile,.chart,.clip{position:relative}
+.row+.row::before{border-top-color:var(--sep)}
+/* навигация — стеклянная капсула */
+.nav{background:var(--glass2)!important;-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);border:1px solid var(--rim2)!important;
+  box-shadow:var(--shadow),inset 0 1px 0 var(--rim)}
+.nav .pill{position:absolute;top:0;left:0;z-index:0;border-radius:999px;background:var(--fill);box-shadow:inset 0 1px 0 var(--rim),0 2px 10px rgba(0,0,0,.08);
+  transition:transform .5s var(--spring),width .5s var(--spring),height .5s var(--spring)}
+.nav a{position:relative;z-index:1;transition:color .3s,transform .25s var(--spring)}.nav a:active{transform:scale(.9)}
+@media (max-width:899px){
+  .nav{left:14px;right:14px;bottom:calc(10px + env(safe-area-inset-bottom));border-radius:32px;padding:6px!important;border-top:1px solid var(--rim2)!important}
+  .nav a{padding:6px 0;border-radius:26px}
+  main{padding-bottom:calc(110px + env(safe-area-inset-bottom))!important}
+  .toast{bottom:calc(100px + env(safe-area-inset-bottom))!important}
+}
+@media (min-width:900px){
+  .nav{top:14px;bottom:14px;left:14px;width:236px;border-radius:26px;border-right:1px solid var(--rim2)!important}
+  .nav a.on{background:transparent!important;color:var(--label)!important}.nav a.on svg{color:var(--tint)!important}
+  .nav .pill{border-radius:14px;background:var(--glass2);box-shadow:var(--shadow),inset 0 1px 0 var(--rim)}
+  main{margin-left:264px!important}
+}
+/* сегменты со скользящим «стеклом» */
+.seg{position:relative;background:var(--fill);border-radius:12px;padding:3px}
+.seg .ind{position:absolute;top:3px;bottom:3px;left:0;border-radius:9px;background:var(--glass2);
+  box-shadow:0 3px 10px rgba(0,0,0,.12),inset 0 1px 0 var(--rim);transition:transform .45s var(--spring),width .45s var(--spring)}
+.seg button{position:relative;z-index:1;background:transparent!important;box-shadow:none!important;transition:color .25s,transform .2s var(--spring)}
+.seg button:active{transform:scale(.94)}
+/* кнопки — пружинка */
+.btn{transition:transform .25s var(--spring),filter .2s,box-shadow .25s;box-shadow:0 4px 14px color-mix(in srgb,var(--tint) 30%,transparent),inset 0 1px 0 rgba(255,255,255,.35)}
+.btn.gray{box-shadow:inset 0 1px 0 var(--rim);background:var(--glass2)}.btn.red{box-shadow:0 4px 14px color-mix(in srgb,var(--red) 30%,transparent),inset 0 1px 0 rgba(255,255,255,.3)}
+.btn.green{box-shadow:0 4px 14px color-mix(in srgb,var(--green) 30%,transparent),inset 0 1px 0 rgba(255,255,255,.3)}
+.btn:active{transform:scale(.95);filter:brightness(.95)}
+@media (hover:hover){.btn:hover{filter:brightness(1.07)}.clip:hover{transform:translateY(-3px)}}
+/* появление экранов и элементов */
+.enter{animation:enter .55s var(--ease) both}
+@keyframes enter{from{opacity:0;transform:translateY(14px) scale(.985);filter:blur(6px)}}
+.enter .group,.enter .tile,.enter .chart,.enter .grid>*{animation:pop .6s var(--ease) both}
+.enter>*:nth-child(2) {animation-delay:.03s}.enter>*:nth-child(3){animation-delay:.06s}.enter>*:nth-child(4){animation-delay:.09s}
+.tiles>*:nth-child(2){animation-delay:.05s!important}.tiles>*:nth-child(3){animation-delay:.1s!important}.tiles>*:nth-child(4){animation-delay:.15s!important}
+@keyframes pop{from{opacity:0;transform:translateY(10px) scale(.97)}}
+.clip{transition:transform .35s var(--spring),opacity .3s,box-shadow .3s;animation:pop .5s var(--ease) both}
+.clip.out{opacity:0;transform:scale(.85)}
+.row{transition:background .2s}a.row:active,.row:active{background:var(--fill)}
+.toast{border-radius:999px!important;transition:transform .5s var(--spring),opacity .3s!important;transform:translateX(-50%) translateY(30px) scale(.9)!important}
+.toast.on{transform:translateX(-50%) translateY(0) scale(1)!important}
+.chart path.line{stroke-dasharray:var(--len);stroke-dashoffset:var(--len);animation:draw 1.2s var(--ease) .15s forwards}
+@keyframes draw{to{stroke-dashoffset:0}}
+h1.title{animation:enter .6s var(--ease) both}
+@media (prefers-reduced-motion:reduce){*,*::before{animation:none!important;transition:none!important}}
+
 </style></head><body>
-<nav class="nav">
+<nav class="nav"><span class="pill" id="pill"></span>
   <div class="brand"><span class="mini"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="6" y="2.5" width="12" height="15" rx="2.5" stroke="#fff" stroke-width="2.4"/><path d="M10.5 7.2v5.6l4.4-2.8z" fill="#fff"/></svg></span>ClipFarm</div>
   <a href="#status" data-t="status">${ICONS.status}<span>Статус</span></a>
   <a href="#clips" data-t="clips">${ICONS.clips}<span>Клипы</span></a>
@@ -783,7 +914,7 @@ h1.title{font-size:34px;font-weight:700;letter-spacing:.2px;margin:10px 4px 18px
   <div class="group">
     <div class="input-row"><input id="url" placeholder="Ссылка на Twitch или ник" autocapitalize="none" autocomplete="off" inputmode="url">
       <button class="btn sm" id="go" onclick="startCh()">Запустить</button></div>
-    <div class="row" style="padding:0 16px"><button id="optbtn" onclick="$('opts').classList.toggle('hide');this.textContent=$('opts').classList.contains('hide')?'Параметры':'Скрыть параметры'" style="font-size:15px;padding:10px 0">Параметры</button></div>
+    <div class="row" style="padding:0 16px"><button id="optbtn" onclick="$('opts').classList.toggle('hide');allInd();this.textContent=$('opts').classList.contains('hide')?'Параметры':'Скрыть параметры'" style="font-size:15px;padding:10px 0">Параметры</button></div>
     <div class="opts hide" id="opts">
       <div><label>Субтитры</label><div class="seg" id="seg-model"><button data-v="small">Быстрые</button><button data-v="medium" class="on">Точные</button><button data-v="large-v3-turbo">Макс.</button></div></div>
       <div><label>Игра</label><div class="seg" id="seg-game"><button data-v="Counter-Strike" class="on">Только CS2</button><button data-v="">Любая</button></div></div>
@@ -845,12 +976,19 @@ function toast(t){const e=$('toast');e.textContent=t;e.classList.add('on');clear
 let S=null, ST=null, TAB='status', CLIPTAB='fresh', RANGE=30;
 
 // навигация
-function show(t){TAB=['status','clips','stats','settings'].includes(t)?t:'status';
-  document.querySelectorAll('.nav a').forEach(a=>a.classList.toggle('on',a.dataset.t===TAB));
-  document.querySelectorAll('main>section').forEach(s=>s.classList.toggle('hide',s.id!=='v-'+TAB));
-  if(TAB==='stats')loadStats();render();window.scrollTo(0,0)}
+function movePill(){const a=document.querySelector('.nav a.on'),p=$('pill'),n=document.querySelector('.nav');if(!a)return;
+  const r=a.getBoundingClientRect(),nr=n.getBoundingClientRect();p.style.width=r.width+'px';p.style.height=r.height+'px';
+  p.style.transform='translate('+(r.left-nr.left-1)+'px,'+(r.top-nr.top-1)+'px)'}
+function segInd(el){let i=el.querySelector('.ind');if(!i){i=document.createElement('i');i.className='ind';el.prepend(i)}
+  const b=el.querySelector('button.on');if(!b||!b.offsetWidth)return;i.style.width=b.offsetWidth+'px';i.style.transform='translateX('+b.offsetLeft+'px)'}
+function allInd(){document.querySelectorAll('.seg').forEach(segInd)}
+function show(t){const prev=TAB;TAB=['status','clips','stats','settings'].includes(t)?t:'status';
+  document.querySelectorAll('.nav a').forEach(a=>a.classList.toggle('on',a.dataset.t===TAB));movePill();
+  document.querySelectorAll('main>section').forEach(s=>{const on=s.id==='v-'+TAB;s.classList.toggle('hide',!on);if(on){s.classList.remove('enter');void s.offsetWidth;s.classList.add('enter')}});
+  if(TAB==='stats')loadStats();render();requestAnimationFrame(allInd);window.scrollTo({top:0,behavior:prev===TAB?'smooth':'instant'})}
+window.addEventListener('resize',()=>{movePill();allInd()});
 window.addEventListener('hashchange',()=>show(location.hash.slice(1)));
-function seg(id,cb){const el=$(id);el.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;el.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));cb&&cb(b.dataset.v)})}
+function seg(id,cb){const el=$(id);segInd(el);el.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;el.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));segInd(el);cb&&cb(b.dataset.v)})}
 const segv=id=>$(id).querySelector('.on').dataset.v;
 seg('seg-model');seg('seg-mult');seg('seg-game');seg('seg-clips',v=>{CLIPTAB=v;$('clips').innerHTML='';render()});
 
@@ -869,7 +1007,7 @@ function renderStatus(){
 }
 
 // клипы
-async function act(c,body){const el=document.querySelector('[data-id="'+c.id+'"]');if(el){el.querySelector('video')?.pause();el.remove()}
+async function act(c,body){const el=document.querySelector('[data-id="'+c.id+'"]');if(el){el.querySelector('video')?.pause();el.classList.add('out');setTimeout(()=>el.remove(),300)}
   await api('/api/decide',{id:c.id,...body});toast(body.post?'✅ В очереди на постинг':body.unqueue?'↩ Вернул в новые':'🗑 Удалён');refresh()}
 async function publishNow(btn){btn.disabled=true;btn.textContent='Публикую…';const r=await api('/api/publish',{});btn.disabled=false;btn.textContent='Опубликовать';
   toast(r.skipped?('Пропуск: '+r.skipped):'🚀 '+Object.entries(r.res||{}).map(([k,v])=>(k==='youtube'?'YouTube':'TikTok')+': '+(String(v).startsWith('http')?'готово':v)).join(' · '));refresh()}
@@ -937,6 +1075,8 @@ function renderStats(){
     :'<div class="empty">Появится после первых публикаций</div>')+'</div>';
   h+='<div class="foot">Обновлено '+(ST.updated?ago(ST.updated):'—')+'. Данные собираются автоматически 5 раз в день.'+((ST.errors||[]).length?'<br><span class="err">'+esc(ST.errors.join(' · '))+'</span>':'')+'</div>';
   box.innerHTML=h;
+  box.querySelectorAll('.tile .n').forEach(el=>{const m=el.textContent.match(/^([\d\s ]+)$/);if(!m)return;const to=+m[1].replace(/\D/g,'');if(!to)return;
+    const t0=performance.now();const f=t=>{const k=Math.min(1,(t-t0)/900),e=1-Math.pow(1-k,3);el.textContent=Math.round(to*e).toLocaleString('ru');if(k<1)requestAnimationFrame(f)};requestAnimationFrame(f)});
   seg('seg-range',v=>{RANGE=+v;renderStats()});
   if(pts.length>=2)drawChart(pts,A);
 }
@@ -952,12 +1092,13 @@ function drawChart(pts,A){
   const step=Math.max(1,Math.ceil(pts.length/Math.max(2,Math.floor(W/80))));
   pts.forEach((p,i)=>{if((i%step===0&&pts.length-1-i>=step*0.7)||i===pts.length-1)svg+='<text x="'+X(i)+'" y="'+(H-6)+'" font-size="11" fill="var(--label2)" text-anchor="'+(i===0?'start':i===pts.length-1?'end':'middle')+'">'+new Date(p.d).toLocaleDateString('ru',{day:'numeric',month:'short'})+'</text>'});
   keys.forEach(([k,n,c])=>{const d=pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p[k]||0).toFixed(1)).join(' ');
-    svg+='<path d="'+d+'" fill="none" stroke="'+c+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+    svg+='<path class="line" d="'+d+'" fill="none" stroke="'+c+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
     const lp=pts[pts.length-1];svg+='<circle cx="'+X(pts.length-1)+'" cy="'+Y(lp[k]||0)+'" r="4" fill="'+c+'" stroke="var(--chart)" stroke-width="2"/>'});
   svg+='<line id="cross" y1="'+pt+'" y2="'+(H-pb)+'" stroke="var(--label3)" stroke-width="1" visibility="hidden"/>';
   keys.forEach(([k,,c])=>svg+='<circle id="hv-'+k+'" r="5" fill="'+c+'" stroke="var(--chart)" stroke-width="2" visibility="hidden"/>');
   svg+='<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="transparent" id="hit"/></svg>';
   host.innerHTML=svg;
+  host.querySelectorAll('path.line').forEach(p=>p.style.setProperty('--len',Math.ceil(p.getTotalLength())));
   const tip=$('tip'),hit=$('hit'),cross=$('cross'),svgEl=$('csvg');
   const move=e=>{const r=svgEl.getBoundingClientRect(),cx=((e.touches?e.touches[0].clientX:e.clientX)-r.left)*W/r.width;
     const i=Math.max(0,Math.min(pts.length-1,Math.round((cx-pl)/((W-pl-pr)/(pts.length-1))))),p=pts[i];
@@ -972,6 +1113,6 @@ function drawChart(pts,A){
 
 function render(){if(!S)return;renderStatus();renderClips();renderSettings();if(TAB==='stats'&&ST)renderStats()}
 async function refresh(){S=await api('/api/state');render()}
-show(location.hash.slice(1)||'status');refresh();setInterval(refresh,15000);
+show(location.hash.slice(1)||'status');setTimeout(()=>{movePill();allInd()},300);refresh();setInterval(refresh,15000);
 window.addEventListener('resize',()=>{if(TAB==='stats'&&ST)renderStats()});
 </script></body></html>`;
