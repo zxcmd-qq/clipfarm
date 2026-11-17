@@ -330,8 +330,9 @@ const CANNED = ['Я бот для нарезок, а не психолог 💀'
   'Имба мысль, но ты на эко', 'Раунд проигран, но вайб засчитан', 'Скажи это ещё раз, только с AWP в руках'];
 async function gemini(env, prompt, model) {
   const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-    method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_KEY, 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_KEY, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(12000),
     body: JSON.stringify({ generationConfig: { temperature: 1.05, maxOutputTokens: 2048 }, contents: [{ parts: [{ text: prompt }] }] }) }).then(r => r.json());
+  if (r.error) console.log('gemini', model, r.error.message);
   // у «думающих» моделей бывает несколько частей — берём текст, не мысли
   const parts = r.candidates?.[0]?.content?.parts || [];
   return parts.filter(p => p.text && !p.thought).map(p => p.text).join(' ').trim();
@@ -358,8 +359,8 @@ ${hist.map(h => `${h.u}: ${h.t}`).join('\n') || '(пусто)'}
 ${replied ? `\n${me} отвечает на сообщение: «${replied}»` : ''}
 Последнее сообщение — ${me}: ${text || '[без текста]'}
 Твой ответ:`;
-    for (const model of ['gemini-flash-latest', 'gemini-flash-lite-latest']) {
-      try { answer = await gemini(env, prompt, model); } catch (e) {}
+    for (const model of ['gemini-flash-lite-latest', 'gemini-flash-latest']) {
+      try { answer = await gemini(env, prompt, model); } catch (e) { console.log('gemini fail', model, e.message); }
       if (answer) break;
     }
     answer = answer.replace(/^(ClipFarm|Бот)\s*:\s*/i, '').replace(/^["«]|["»]$/g, '').slice(0, 400);
@@ -409,13 +410,17 @@ async function groupMessage(env, m) {
     return tg(env, 'setMessageReaction', { chat_id: m.chat.id, message_id: m.message_id, reaction: [{ type: 'emoji', emoji: pick(['😭', '🤡', '💔', '🙈']) }] });
 }
 
-async function tgHook(env, req) {
+async function tgHook(env, req, ctx) {
   if (req.headers.get('X-Telegram-Bot-Api-Secret-Token') !== await hmac(env, 'tghook')) return new Response('no', { status: 403 });
   const u = await req.json().catch(() => ({}));
   if (u.callback_query) return clipButton(env, u.callback_query);
   const m = u.message;
   if (!m) return new Response('ok');
-  if (m.chat?.type && m.chat.type !== 'private') { try { await groupMessage(env, m); } catch (e) {} return new Response('ok'); }
+  if (m.chat?.type && m.chat.type !== 'private') {
+    // отвечаем Telegram сразу, а думаем в фоне — иначе Telegram обрывает запрос и ответ теряется
+    ctx.waitUntil(groupMessage(env, m).catch(e => console.log('group error', e.message)));
+    return new Response('ok');
+  }
   const say = text => tg(env, 'sendMessage', { chat_id: m.chat.id, text });
   const text = (m.text || '').trim();
   const p = text.match(/^\/start ([a-z0-9_]+)-([0-9a-f]{16})$/);
@@ -666,7 +671,7 @@ export default {
     } })());
   },
 
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
 
     if (url.pathname === '/login' && req.method === 'POST') {
@@ -677,7 +682,7 @@ export default {
     }
     if (url.pathname === '/logout') return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': 'cf_auth=; Path=/; Max-Age=0' } });
 
-    if (url.pathname === '/tg/hook' && req.method === 'POST') return tgHook(env, req);
+    if (url.pathname === '/tg/hook' && req.method === 'POST') return tgHook(env, req, ctx);
     if (url.pathname === '/pub/newclip' && req.method === 'POST') {   // нарезчик сообщает о новом клипе
       const b = await req.json().catch(() => ({}));
       return json(env.KV ? await notifyClip(env, b.name) : { error: 'kv' });
