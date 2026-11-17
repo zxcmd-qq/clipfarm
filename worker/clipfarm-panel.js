@@ -109,7 +109,7 @@ export default {
         const ch = channelFrom(b.url);
         if (!ch) return json({ error: 'Не понял ссылку. Пример: twitch.tv/shadowkekw' }, 400);
         const r = await gh(env, `/actions/workflows/${WF}/dispatches`, { method: 'POST',
-          body: JSON.stringify({ ref: 'main', inputs: { channel: ch, model: b.model || 'small', mult: String(b.mult || '2.5'), part: '1' } }) });
+          body: JSON.stringify({ ref: 'main', inputs: { channel: ch, model: b.model || 'medium', mult: String(b.mult || '2.5'), part: '1' } }) });
         return r.status === 204 ? json({ ok: true, channel: ch })
           : json({ error: `GitHub ответил ${r.status}: ${(await r.text()).slice(0, 200)}` }, 500);
       }
@@ -168,7 +168,7 @@ video{width:100%;aspect-ratio:9/16;background:#000;display:block}
 <header>
   <h1>Clip<b>Farm</b></h1>
   <input id="url" placeholder="https://twitch.tv/shadowkekw">
-  <select id="model" title="Субтитры"><option value="small">Whisper small</option><option value="base">Whisper base (быстрее)</option></select>
+  <select id="model" title="Субтитры"><option value="medium">Субтитры: точные (medium)</option><option value="large-v3-turbo">Самые точные (turbo, медленнее)</option><option value="small">Быстрые (small)</option></select>
   <select id="mult" title="Чувствительность"><option value="2.5">Порог 2.5×</option><option value="2">2× (больше клипов)</option><option value="3.5">3.5× (меньше клипов)</option></select>
   <button class="go" id="go" onclick="startCh()">▶ Запустить</button><span id="err" class="err"></span>
 </header>

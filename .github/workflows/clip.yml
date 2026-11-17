@@ -9,7 +9,7 @@ on:
         required: true
       model:
         description: 'Whisper: base / small'
-        default: 'small'
+        default: 'medium'
       mult:
         description: 'Порог всплеска (во сколько раз выше нормы)'
         default: '2.5'

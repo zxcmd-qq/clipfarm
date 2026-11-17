@@ -166,8 +166,11 @@ def transcribe(wav, model, lang):
     import wave, numpy as np
     with wave.open(str(wav), "rb") as w:
         audio = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768.0
-    segs, _ = _whisper.transcribe(audio, language=lang or None,
-                                  word_timestamps=True, vad_filter=True)
+    segs, _ = _whisper.transcribe(
+        audio, language=lang or None, word_timestamps=True, beam_size=5,
+        vad_filter=True, vad_parameters={"min_silence_duration_ms": 300},
+        condition_on_previous_text=False,     # меньше «галлюцинаций» на шуме игры
+        initial_prompt="Стрим на Twitch. Разговорная речь, сленг, мат.")
     return [(w.start, w.end, w.word.strip()) for s in segs for w in s.words]
 
 def ass_time(t):
@@ -193,7 +196,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         chunk = words[i:i + per_line]
         txt = " ".join(w for _, _, w in chunk).upper().replace("{", "").replace("}", "")
         lines.append(f"Dialogue: 0,{ass_time(chunk[0][0])},{ass_time(chunk[-1][1])},"
-                     f"Main,,0,0,0,,{{\\fad(60,0)}}{txt}")
+                     f"Main,,0,0,0,,{txt}")
     head = head.replace("MARGIN", str(int(margin_v))).replace("FONT", font)
     path.write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
 
@@ -427,7 +430,7 @@ def main():
                     help="cam: вебка сверху + игра; blur: игра на размытом фоне; crop: кроп по центру")
     ap.add_argument("--cam", default="", help="ручная рамка вебки x,y,w,h в долях кадра")
     ap.add_argument("--no-subs", action="store_true")
-    ap.add_argument("--model", default="small", help="whisper: tiny/base/small/medium")
+    ap.add_argument("--model", default="medium", help="whisper: base/small/medium/large-v3-turbo")
     ap.add_argument("--lang", default="ru", help="язык речи (пусто = авто)")
     ap.add_argument("--keep-work", action="store_true")
     ap.add_argument("--keep-rec", action="store_true", help="не удалять запись стрима после стопа")
