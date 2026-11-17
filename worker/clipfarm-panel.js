@@ -204,10 +204,17 @@ async function myBanners(env, owner) {
 }
 async function saveBanner(env, owner, m) {
   const f = m.video || m.animation || (m.document && /video/.test(m.document.mime_type || '') ? m.document : null);
-  if (!f) return 'Пришли видео баннера (на зелёном фоне, со звуком) с подписью — названием, например RubUp.';
+  if (!f) return 'Пришли видео баннера (на зелёном фоне, со звуком).';
   if ((f.file_size || 0) > 20e6) return '❌ Telegram отдаёт ботам файлы только до 20 МБ — сожми баннер.';
-  const base = bannerName(m.caption);
-  if (!base) return '❌ Добавь подпись к видео — название баннера, например RubUp.';
+  if (!bannerName(m.caption)) {                        // без подписи — спросим название
+    await kvPut(env, `pending:${owner}`, { file_id: f.file_id, file_size: f.file_size });
+    return '📝 Как назвать баннер? Напиши название (например RubUp).';
+  }
+  return storeBanner(env, owner, f, m.caption);
+}
+async function storeBanner(env, owner, f, caption) {
+  const base = bannerName(caption);
+  if (!base) return '❌ Название должно содержать буквы или цифры. Напиши ещё раз.';
   const have = new Set((await myBanners(env, owner)).map(b => b.name.toLowerCase()));
   let name = base;
   for (let i = 1; have.has(name.toLowerCase()); i++) name = `${base}_${i}`;
@@ -263,6 +270,12 @@ async function tgHook(env, req) {
   try {
     if (m.video || m.animation || m.document) await say(await saveBanner(env, owner, m));
     else if (/^\/banners?\b/i.test(text)) await say(await bannerCmd(env, owner, text.replace(/^\/banners?(@\w+)?/i, '').trim()));
+    else if (text && !text.startsWith('/') && await kvGet(env, `pending:${owner}`)) {   // ответ на «как назвать?»
+      const f = await kvGet(env, `pending:${owner}`);
+      const r = await storeBanner(env, owner, f, text);
+      if (r.startsWith('✅')) await env.KV.delete(`pending:${owner}`);
+      await say(r);
+    }
     else await say('Команды:\n/banner — мои баннеры\n/banner Имя — включить\n/banner stop — выключить\n/banner del Имя — удалить\n\nНовый баннер: пришли видео с подписью-названием.');
   } catch (e) { await say('⚠️ Ошибка: ' + e.message); }
   return new Response('ok');
