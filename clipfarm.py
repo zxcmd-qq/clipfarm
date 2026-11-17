@@ -498,17 +498,14 @@ def upload(final, args, peak):
         print(f"[up] ошибка загрузки: {r.stderr[-300:]}", flush=True); return
     print(f"[up] ☁️ {final.name} в релизе {args.upload}", flush=True)
     final.unlink(missing_ok=True); final.with_suffix(".txt").unlink(missing_ok=True)
-    tok, chat_id = os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID")
-    if tok and chat_id:
-        import urllib.request, urllib.parse
-        txt = f"🎬 Новый клип: {args.channel}\n{label}"
-        if os.environ.get("PANEL_URL"):
-            txt += f"\n{os.environ['PANEL_URL']}"
-        try:
-            urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage",
-                urllib.parse.urlencode({"chat_id": chat_id, "text": txt}).encode(), timeout=15)
-        except Exception as e:
-            print(f"[tg] {e}")
+    # панель шлёт владельцу клип в Telegram с кнопками ✅/❌
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{API}/pub/newclip", data=json.dumps({"name": final.name}).encode(),
+                                     headers={"Content-Type": "application/json", "User-Agent": "clipfarm-runner"})
+        urllib.request.urlopen(req, timeout=20).read()
+    except Exception as e:
+        print(f"[tg] уведомление не ушло: {e}", flush=True)
 
 def cutter_worker(q, args, rec):
     while True:

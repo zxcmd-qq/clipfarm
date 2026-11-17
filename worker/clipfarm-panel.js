@@ -170,7 +170,7 @@ const tgEsc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 async function tgConnect(env, me) {
   if (!env.TG_BOT_TOKEN) return html(msgPage('❌ В воркере нет TG_BOT_TOKEN'), 500);
   // вебхук ставим каждый раз — это безопасно и чинит его, если сбился
-  await tg(env, 'setWebhook', { url: `${BASE}/tg/hook`, secret_token: await hmac(env, 'tghook'), allowed_updates: ['message'] });
+  await tg(env, 'setWebhook', { url: `${BASE}/tg/hook`, secret_token: await hmac(env, 'tghook'), allowed_updates: ['message', 'callback_query'] });
   const bot = await tg(env, 'getMe', {});
   const name = bot.result?.username;
   if (!name) return html(msgPage('❌ Telegram не принял токен бота'), 500);
@@ -254,6 +254,7 @@ async function bannerCmd(env, owner, arg) {
 async function tgHook(env, req) {
   if (req.headers.get('X-Telegram-Bot-Api-Secret-Token') !== await hmac(env, 'tghook')) return new Response('no', { status: 403 });
   const u = await req.json().catch(() => ({}));
+  if (u.callback_query) return clipButton(env, u.callback_query);
   const m = u.message;
   if (!m) return new Response('ok');
   const say = text => tg(env, 'sendMessage', { chat_id: m.chat.id, text });
@@ -278,6 +279,54 @@ async function tgHook(env, req) {
     }
     else await say('Команды:\n/banner — мои баннеры\n/banner Имя — включить\n/banner stop — выключить\n/banner del Имя — удалить\n\nНовый баннер: пришли видео с подписью-названием.');
   } catch (e) { await say('⚠️ Ошибка: ' + e.message); }
+  return new Response('ok');
+}
+
+// ---------------- уведомление о новом клипе с кнопками ✅/❌
+async function ensureHook(env) {
+  if (await env.KV.get('hook:v2')) return;
+  await tg(env, 'setWebhook', { url: `${BASE}/tg/hook`, secret_token: await hmac(env, 'tghook'), allowed_updates: ['message', 'callback_query'] });
+  await env.KV.put('hook:v2', '1');
+}
+
+async function notifyClip(env, name) {
+  if (!/^[a-z0-9_]+__[\w-]+\.mp4$/.test(name || '')) return { error: 'name' };
+  if (await env.KV.get(`notified:${name}`)) return { ok: true, dup: true };
+  const a = (await allAssets(env)).find(x => x.name === name);       // клип должен реально лежать в релизе
+  if (!a) return { error: 'нет такого клипа' };
+  const p = parseName(env, a.name);
+  await env.KV.put(`notified:${name}`, '1', { expirationTtl: 7 * 86400 });
+  const t = await kvGet(env, `tg:${p.owner}`);
+  if (!t || !env.TG_BOT_TOKEN) return { ok: true, skipped: 'tg не подключён' };
+  await ensureHook(env);
+  const caption = `🎬 Новый клип: ${p.streamer}\n${a.label || ''}`.trim();
+  const reply_markup = { inline_keyboard: [[{ text: '✅ Постить', callback_data: `ok:${a.id}` }, { text: '❌ Нет', callback_data: `no:${a.id}` }]] };
+  let r = await tg(env, 'sendVideo', { chat_id: t.chat, video: a.browser_download_url, caption, reply_markup, supports_streaming: true });
+  if (!r.ok) r = await tg(env, 'sendMessage', { chat_id: t.chat, text: caption + `\n${BASE}`, reply_markup });
+  return { ok: !!r.ok };
+}
+
+async function clipButton(env, q) {
+  const owner = await ownerByChat(env, q.message?.chat?.id);
+  const [act, id] = String(q.data || '').split(':');
+  const done = text => tg(env, 'answerCallbackQuery', { callback_query_id: q.id, text });
+  const a = await gh(env, `/releases/assets/${Number(id)}`).then(r => r.json()).catch(() => ({}));
+  if (!a.name) { await done('Клипа уже нет'); return new Response('ok'); }
+  const p = parseName(env, a.name);
+  if (!owner || p.owner !== owner) { await done('Это не твой клип'); return new Response('ok'); }
+  let note;
+  if (p.stage !== 'fresh') note = p.stage === 'approved' ? '✅ уже в очереди' : '🚀 уже опубликован';
+  else if (act === 'ok') {
+    await gh(env, `/releases/assets/${a.id}`, { method: 'PATCH', body: JSON.stringify({ name: 'ok_' + p.base, label: a.label || '' }) });
+    note = '✅ В очереди на постинг';
+  } else {
+    await gh(env, `/releases/assets/${a.id}`, { method: 'DELETE' });
+    note = '❌ Удалён';
+  }
+  await done(note);
+  const cap = (q.message.caption || q.message.text || '') + `\n\n${note}`;
+  await tg(env, q.message.caption !== undefined ? 'editMessageCaption' : 'editMessageText', {
+    chat_id: q.message.chat.id, message_id: q.message.message_id, [q.message.caption !== undefined ? 'caption' : 'text']: cap, reply_markup: { inline_keyboard: [] } });
   return new Response('ok');
 }
 
@@ -402,6 +451,10 @@ export default {
     if (url.pathname === '/logout') return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': 'cf_auth=; Path=/; Max-Age=0' } });
 
     if (url.pathname === '/tg/hook' && req.method === 'POST') return tgHook(env, req);
+    if (url.pathname === '/pub/newclip' && req.method === 'POST') {   // нарезчик сообщает о новом клипе
+      const b = await req.json().catch(() => ({}));
+      return json(env.KV ? await notifyClip(env, b.name) : { error: 'kv' });
+    }
     const pb = url.pathname.match(/^\/pub\/banner\/([a-z0-9_]+)$/);
     if (pb) {                                           // нарезчик спрашивает, какой баннер вставлять
       const name = env.KV ? await env.KV.get(`banner:${pb[1]}`) : null;
