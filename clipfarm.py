@@ -173,6 +173,26 @@ def transcribe(wav, model, lang):
         initial_prompt="Стрим на Twitch. Разговорная речь, сленг, мат.")
     return [(w.start, w.end, w.word.strip()) for s in segs for w in s.words]
 
+# ---- цензура мата в субтитрах: ж*па, п*здец (вторая буква — звёздочка)
+_PFX = r"(?:за|на|по|от|у|вы|до|пере|раз|рас|съ|въ|об|объ|под|подъ|при|про|из|изъ|недо|о|отъ)?"
+_BAD = re.compile("|".join(f"(?:{p})" for p in [
+    r"\w*ху[йеёяию]\w*", r"\w*пизд\w*", r"\b" + _PFX + r"[ьъ]?[её]б(?:[аулнитко]|ш|ыв)\w*", r"\b[её]б\b",
+    r"\w*долбо[её]б\w*", r"\bбля\w*", r"\bсук(?:а|и|у|е|ой|ам|ами|ах|ин\w*)\b", r"\bмуд(?:ак|ил|о|ач)\w*",
+    r"\bпид(?:о|а)?р\w*", r"\bгандон\w*", r"\w*залуп\w*", r"\bшлюх\w*", r"\w*дроч\w*",
+    r"\w*ж[оа]п\w*", r"\bговн\w*", r"\bсра[лнтк]\w*", r"\bсрать\w*", r"\b(?:по|на|ни)?хер(?!сон)\w*",
+]), re.IGNORECASE)
+
+_ROOT = re.compile(r"ху[йеёяию]|пизд|[её]б|бля|сук|ж[оа]п|говн|сра|хер|муд|пид|гандон|залуп|шлюх|дроч", re.IGNORECASE)
+
+def _mask(m):
+    w = m.group(0)
+    r = _ROOT.search(w)
+    i = (r.start() if r else 0) + 1          # звёздочка на вторую букву корня: ж*па, нах*й
+    return w[:i] + "*" + w[i + 1:] if i < len(w) else w
+
+def censor(text):
+    return _BAD.sub(_mask, text)
+
 def ass_time(t):
     h, t = divmod(max(t, 0), 3600); m, s = divmod(t, 60)
     return f"{int(h)}:{int(m):02d}:{s:05.2f}"
@@ -194,7 +214,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     lines = []
     for i in range(0, len(words), per_line):
         chunk = words[i:i + per_line]
-        txt = " ".join(w for _, _, w in chunk).upper().replace("{", "").replace("}", "")
+        txt = censor(" ".join(w for _, _, w in chunk)).upper().replace("{", "").replace("}", "")
         lines.append(f"Dialogue: 0,{ass_time(chunk[0][0])},{ass_time(chunk[-1][1])},"
                      f"Main,,0,0,0,,{txt}")
     head = head.replace("MARGIN", str(int(margin_v))).replace("FONT", font)
