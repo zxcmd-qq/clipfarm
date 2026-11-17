@@ -355,7 +355,7 @@ def make_clip(job, args):
                  "-of", "csv=p=0", str(src)], text=True).strip() or 0)
         except Exception:
             have = 0
-        if have - start < 8:
+        if have - start < 10:
             print(f"[cut] {tag}: запись не догнала, пропуск", flush=True); return
         dur = have - start - 0.5
 
@@ -408,6 +408,23 @@ def make_clip(job, args):
     if args.upload:
         upload(final, args, [w for w, _ in top])
 
+# ---------------------------------------------------------------- game filter
+_game = {"t": 0, "name": ""}
+def game_ok(channel, want):
+    """Какая игра сейчас на стриме (Twitch GQL, без авторизации). Кэш 2 мин."""
+    if time.time() - _game["t"] > 120:
+        import urllib.request
+        try:
+            q = json.dumps({"query": 'query{user(login:"%s"){stream{game{name}}}}' % channel}).encode()
+            req = urllib.request.Request("https://gql.twitch.tv/gql", data=q, headers={
+                "Client-ID": "kimne78kx3ncx6brgo4mv6wki5h1ko", "Content-Type": "application/json"})
+            d = json.loads(urllib.request.urlopen(req, timeout=10).read())
+            _game.update(t=time.time(), name=(((d.get("data") or {}).get("user") or {}).get("stream") or {}).get("game", {}).get("name", "") or "")
+        except Exception as e:
+            print(f"[game] не узнал игру: {e}", flush=True)
+            return True                      # не знаем — не мешаем
+    return want.lower() in _game["name"].lower()
+
 # ---------------------------------------------------------------- banners
 API = os.environ.get("CLIPFARM_API", "https://clipfarm.osttima.workers.dev")
 
@@ -450,41 +467,55 @@ def _green(p):
         return "0x%02X%02X%02X" % (raw[0], raw[1], raw[2])
     return "0x00FF00"
 
-def insert_banner(final, banner, words, work):
-    """[клип до T] + [стоп-кадр T, поверх баннер без зелени, звук баннера] + [клип после T]."""
-    total, bdur = _dur(final), _dur(banner)
-    if total < 6 or bdur <= 0:
-        return
-    mid = total / 2
-    # ставим паузу в промежуток между фразами, ближайший к середине
+def banner_points(total, words):
+    """Требования рекламодателя: ролик до 60 с — баннер строго посередине;
+    длиннее — по одному на каждые 60 с (на 30-й, 90-й, 150-й… секунде)."""
+    pts = [total / 2] if total <= 60 else [30 + 60 * k for k in range(int((total - 30) // 60) + 1) if 30 + 60 * k < total - 3]
     gaps = [(words[i][1] + words[i + 1][0]) / 2 for i in range(len(words) - 1)
             if words[i + 1][0] - words[i][1] > 0.15] if words else []
-    T = min(gaps, key=lambda g: abs(g - mid)) if gaps else mid
-    if abs(T - mid) > total * 0.25:
-        T = mid
+    out = []
+    for p in pts:                       # не рвём слово: сдвиг не больше чем на 1 с
+        g = min(gaps, key=lambda x: abs(x - p)) if gaps else p
+        out.append(g if abs(g - p) <= 1.0 else p)
+    return out
+
+def insert_banner(final, banner, words, work):
+    """Клип ставится на паузу (стоп-кадр), поверх — баннер без зелени со своим звуком, потом клип продолжается."""
+    total, bdur = _dur(final), _dur(banner)
+    if total < 10 or bdur <= 0:
+        return
+    pts = banner_points(total, words)
     has_audio = bool(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
                                      "-of", "csv=p=0", str(banner)], capture_output=True, text=True).stdout.strip())
+    if not has_audio:
+        print("[banner] ⚠️ у баннера нет звука — рекламодатель требует озвучку!", flush=True)
     key = f"chromakey={_green(banner)}:0.2:0.08,despill=type=green"
+    n = len(pts)
+    cuts = [0] + pts + [total]
+    fc = f"[0:v]fps=30,split={2 * n + 1}" + "".join(f"[s{i}]" for i in range(2 * n + 1)) + ";"
+    fc += f"[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit={n + 1}" + "".join(f"[t{i}]" for i in range(n + 1)) + ";"
+    fc += f"[1:v]fps=30,scale=1080:1920:force_original_aspect_ratio=decrease,{key},split={n}" + "".join(f"[bn{i}]" for i in range(n)) + ";"
+    if has_audio:
+        fc += f"[1:a]aresample=48000,aformat=channel_layouts=stereo,apad,atrim=0:{bdur},asplit={n}" + "".join(f"[ba{i}]" for i in range(n)) + ";"
+    seq = ""
+    for i in range(n + 1):
+        a, b = cuts[i], cuts[i + 1]
+        fc += f"[s{2 * i}]trim={a}:{b},setpts=PTS-STARTPTS[v{i}];[t{i}]atrim={a}:{b},asetpts=PTS-STARTPTS[a{i}];"
+        seq += f"[v{i}][a{i}]"
+        if i < n:
+            T = cuts[i + 1]
+            fc += (f"[s{2 * i + 1}]trim=start={T},setpts=PTS-STARTPTS,trim=end_frame=1,loop=loop=-1:size=1,"
+                   f"trim=0:{bdur},setpts=PTS-STARTPTS[fz{i}];[fz{i}][bn{i}]overlay=(W-w)/2:(H-h)/2:eof_action=pass,format=yuv420p[bv{i}];")
+            if not has_audio:
+                fc += f"anullsrc=r=48000:cl=stereo,atrim=0:{bdur}[ba{i}];"
+            seq += f"[bv{i}][ba{i}]"
+    fc += f"{seq}concat=n={2 * n + 1}:v=1:a=1[v][a]"
     out = work / "with_banner.mp4"
-    a_banner = "[1:a]aresample=48000,aformat=channel_layouts=stereo,apad[ba];[ba]atrim=0:{d}[a1];".format(d=bdur) if has_audio \
-        else "anullsrc=r=48000:cl=stereo,atrim=0:{d}[a1];".format(d=bdur)
-    fc = (
-        f"[0:v]fps=30,split=3[va][vf][vb];"
-        f"[va]trim=0:{T},setpts=PTS-STARTPTS[v0];"
-        f"[vf]trim=start={T},setpts=PTS-STARTPTS,trim=end_frame=1,loop=loop=-1:size=1,trim=0:{bdur},setpts=PTS-STARTPTS[frz];"
-        f"[1:v]fps=30,scale=1080:1920:force_original_aspect_ratio=decrease,{key}[bn];"
-        f"[frz][bn]overlay=(W-w)/2:(H-h)/2:eof_action=pass,format=yuv420p[v1];"
-        f"[vb]trim=start={T},setpts=PTS-STARTPTS[v2];"
-        f"[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[aa][ab];"
-        f"[aa]atrim=0:{T},asetpts=PTS-STARTPTS[a0];"
-        f"[ab]atrim=start={T},asetpts=PTS-STARTPTS[a2];"
-        + a_banner +
-        f"[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]"
-    )
     run(["ffmpeg", "-y", "-i", str(final), "-i", str(banner), "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)])
     shutil.move(str(out), str(final))
+    print(f"[banner] вставлен на {', '.join(f'{p:.1f}' for p in pts)} с", flush=True)
 
 def upload(final, args, peak):
     """Облако: клип -> GitHub-релиз (панель берёт его оттуда) + пинг в Telegram."""
@@ -541,6 +572,7 @@ def main():
     ap.add_argument("--keep-work", action="store_true")
     ap.add_argument("--keep-rec", action="store_true", help="не удалять запись стрима после стопа")
     ap.add_argument("--font", default=os.environ.get("SUB_FONT", "Arial Black"))
+    ap.add_argument("--only-game", default="", help="резать только когда на стриме эта игра (напр. Counter-Strike)")
     ap.add_argument("--owner", default="", help="владелец клипов (пользователь панели)")
     ap.add_argument("--upload", default="", help="имя GitHub-релиза для заливки клипов (облако)")
     ap.add_argument("--max-hours", type=float, default=0, help="выйти через N часов (код 3, если стрим ещё идёт)")
@@ -588,6 +620,9 @@ def main():
             spike, score = det.feed(msgs, now)
             print(f"[{time.strftime('%H:%M:%S')}] сообщений за {args.bucket}с: "
                   f"{len(msgs):3d}  score {score:5.1f}" + ("  🔥 ВСПЛЕСК" if spike else ""), flush=True)
+            if spike and args.only_game and not game_ok(ch, args.only_game):
+                print(f"[game] сейчас не {args.only_game} — клип пропущен", flush=True)
+                spike = False
             if spike:
                 offset = now - rec.t0
                 start = max(0, offset - args.bucket - args.pre)

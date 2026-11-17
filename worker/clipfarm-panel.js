@@ -394,7 +394,7 @@ async function tgReport(env, owner, entry) {
 // ---------------------------------------------------------------- publishing
 async function caption(env, c) {
   const streamer = c.streamer;
-  const fallback = { title: `${streamer} выдал завозик 😳`, tags: [streamer, 'twitch', 'стрим', 'нарезки'] };
+  const fallback = { title: `${streamer} выдал завозик 😳`, tags: [streamer, 'cs2', 'counterstrike', 'нарезки'] };
   if (!env.GEMINI_KEY) return fallback;
   const prompt = `Ты админ молодёжного паблика с нарезками со стримов (TikTok и YouTube Shorts, зрители 14–25 лет, Россия/СНГ).
 Стример: ${streamer}. Что спамил чат в момент клипа: ${c.label.replace(/^чат:\s*/, '') || 'нет данных'}.
@@ -404,10 +404,12 @@ async function caption(env, c) {
 - можно капс на одном слове для эмоции, 1–2 эмодзи (😭💀🔥😳🤯);
 - до 70 символов, без кавычек, без мата (можно ж*па-стиль со звёздочкой, но лучше без), без слов про насилие, криминал, кровь, «шок», «жесть»;
 - не выдумывай конкретные события, которых нет в данных, — играй на эмоции чата и ник стримера;
-- ник стримера пиши как есть.
+- ник стримера пиши как есть;
+- тематика — Counter-Strike 2: можно «катка», «клатч», «эйс», «раунд», «AWP», если уместно;
+- НЕЛЬЗЯ упоминать или рекламировать другие проекты, сайты, казино, кейс-сайты, промокоды, бренды и ссылки.
 Примеры стиля: «${streamer} выдал ЗАВОЗИК, чат в отлёте 💀», «это просто дабл ю от ${streamer} 🔥», «${streamer} словил тильт 😭 жиза».
 
-Ещё 5 хештегов без # латиницей или кириллицей, без пробелов: ник стримера, twitch, нарезки + 2 по теме.
+Ещё 5 хештегов без # латиницей или кириллицей, без пробелов: ник стримера, cs2, нарезки + 2 по теме (без брендов и других проектов).
 Ответ строго JSON: {"title":"...","tags":["..."]}`;
   try {
     const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent', {
@@ -609,7 +611,7 @@ export default {
         const ch = channelFrom(b.url);
         if (!ch) return json({ error: 'Не понял ссылку. Пример: twitch.tv/shadowkekw' }, 400);
         const r = await gh(env, `/actions/workflows/${WF}/dispatches`, { method: 'POST',
-          body: JSON.stringify({ ref: 'main', inputs: { channel: ch, owner: me, model: b.model || 'medium', mult: String(b.mult || '2.5'), part: '1' } }) });
+          body: JSON.stringify({ ref: 'main', inputs: { channel: ch, owner: me, model: b.model || 'medium', mult: String(b.mult || '2.5'), only_game: b.game ?? 'Counter-Strike', part: '1' } }) });
         return r.status === 204 ? json({ ok: true, channel: ch })
           : json({ error: `GitHub ответил ${r.status}: ${(await r.text()).slice(0, 200)}` }, 500);
       }
@@ -784,6 +786,7 @@ h1.title{font-size:34px;font-weight:700;letter-spacing:.2px;margin:10px 4px 18px
     <div class="row" style="padding:0 16px"><button id="optbtn" onclick="$('opts').classList.toggle('hide');this.textContent=$('opts').classList.contains('hide')?'Параметры':'Скрыть параметры'" style="font-size:15px;padding:10px 0">Параметры</button></div>
     <div class="opts hide" id="opts">
       <div><label>Субтитры</label><div class="seg" id="seg-model"><button data-v="small">Быстрые</button><button data-v="medium" class="on">Точные</button><button data-v="large-v3-turbo">Макс.</button></div></div>
+      <div><label>Игра</label><div class="seg" id="seg-game"><button data-v="Counter-Strike" class="on">Только CS2</button><button data-v="">Любая</button></div></div>
       <div><label>Сколько клипов</label><div class="seg" id="seg-mult"><button data-v="3.5">Меньше</button><button data-v="2.5" class="on">Норм</button><button data-v="2">Больше</button></div></div>
     </div>
   </div>
@@ -849,12 +852,12 @@ function show(t){TAB=['status','clips','stats','settings'].includes(t)?t:'status
 window.addEventListener('hashchange',()=>show(location.hash.slice(1)));
 function seg(id,cb){const el=$(id);el.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;el.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));cb&&cb(b.dataset.v)})}
 const segv=id=>$(id).querySelector('.on').dataset.v;
-seg('seg-model');seg('seg-mult');seg('seg-clips',v=>{CLIPTAB=v;$('clips').innerHTML='';render()});
+seg('seg-model');seg('seg-mult');seg('seg-game');seg('seg-clips',v=>{CLIPTAB=v;$('clips').innerHTML='';render()});
 
 // статус
 $('url').addEventListener('keydown',e=>{if(e.key==='Enter')startCh()});
 async function startCh(){const b=$('go');b.disabled=true;
-  const r=await api('/api/start',{url:$('url').value,model:segv('seg-model'),mult:segv('seg-mult')});b.disabled=false;
+  const r=await api('/api/start',{url:$('url').value,model:segv('seg-model'),mult:segv('seg-mult'),game:segv('seg-game')});b.disabled=false;
   if(r.error)toast(r.error);else{$('url').value='';toast('▶ '+r.channel+' запускается — пара минут');setTimeout(refresh,3000)}}
 async function stopRun(id,btn){btn.disabled=true;btn.textContent='Стоп…';await api('/api/stop',{id});toast('Останавливаю — до минуты');setTimeout(refresh,4000)}
 function renderStatus(){
