@@ -82,10 +82,11 @@ const kvPut = (env, k, v) => env.KV ? env.KV.put(k, JSON.stringify(v)) : null;
 
 // ---------------------------------------------------------------- state
 async function state(env, me) {
-  const [runsR, assets, yt, tt, log, tgc] = await Promise.all([
+  const [runsR, assets, yt, tt, log, tgc, banner] = await Promise.all([
     gh(env, `/actions/workflows/${WF}/runs?per_page=40`),
     allAssets(env),
     kvGet(env, `acct:${me}:youtube`), kvGet(env, `acct:${me}:tiktok`), kvGet(env, `log:${me}`), kvGet(env, `tg:${me}`),
+    env.KV ? env.KV.get(`banner:${me}`) : null,
   ]);
   const runs = (runsR.ok ? (await runsR.json()).workflow_runs : [])
     .filter(r => (r.display_title || '').includes(`· ${me} `) || (me === firstUser(env) && !(r.display_title || '').includes(' · ')));
@@ -96,7 +97,7 @@ async function state(env, me) {
   const clips = assets.map(a => ({ id: a.id, name: a.name, label: a.label || '', size: a.size, created: a.created_at, ...parseName(env, a.name) }))
     .filter(c => c.owner === me).sort((a, b) => b.created.localeCompare(a.created));
   return {
-    me, active, recent,
+    me, active, recent, banner,
     fresh: clips.filter(c => c.stage === 'fresh'),
     approved: clips.filter(c => c.stage === 'approved').reverse(),       // очередь: старые первыми
     posted: clips.filter(c => c.stage === 'posted').slice(0, 30),
@@ -176,18 +177,94 @@ async function tgConnect(env, me) {
   return Response.redirect(`https://t.me/${name}?start=${me}-${(await hmac(env, 'tg:' + me)).slice(0, 16)}`, 302);
 }
 
+async function ownerByChat(env, chat) {
+  const direct = env.KV ? await env.KV.get(`tgchat:${chat}`) : null;
+  if (direct) return direct;
+  for (const u of Object.keys(users(env))) {                       // подключившиеся до этой версии
+    const t = await kvGet(env, `tg:${u}`);
+    if (t && String(t.chat) === String(chat)) { await env.KV.put(`tgchat:${chat}`, u); return u; }
+  }
+  return null;
+}
+
+// ---------------- баннеры: релиз "banners", файлы <user>__<Name>.mp4, активный — KV banner:<user>
+const TR = { а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',л:'l',м:'m',н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'h',ц:'c',ч:'ch',ш:'sh',щ:'sch',ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya' };
+const bannerName = s => String(s || '').trim().split('').map(ch => { const l = ch.toLowerCase(); return TR[l] !== undefined ? (ch === l ? TR[l] : TR[l].charAt(0).toUpperCase() + TR[l].slice(1)) : ch; })
+  .join('').replace(/\s+/g, '_').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+
+async function bannerRelease(env) {
+  let r = await gh(env, '/releases/tags/banners');
+  if (r.status === 404) r = await gh(env, '/releases', { method: 'POST', body: JSON.stringify({ tag_name: 'banners', name: 'Баннеры', body: 'Библиотеки баннеров пользователей ClipFarm' }) });
+  return r.ok ? r.json() : null;
+}
+async function myBanners(env, owner) {
+  const rel = await bannerRelease(env);
+  return rel ? (rel.assets || []).filter(a => a.name.startsWith(owner + '__')).map(a => ({ id: a.id, file: a.name, size: a.size,
+    name: a.name.slice(owner.length + 2).replace(/\.mp4$/, '') })) : [];
+}
+async function saveBanner(env, owner, m) {
+  const f = m.video || m.animation || (m.document && /video/.test(m.document.mime_type || '') ? m.document : null);
+  if (!f) return 'Пришли видео баннера (на зелёном фоне, со звуком) с подписью — названием, например RubUp.';
+  if ((f.file_size || 0) > 20e6) return '❌ Telegram отдаёт ботам файлы только до 20 МБ — сожми баннер.';
+  const base = bannerName(m.caption);
+  if (!base) return '❌ Добавь подпись к видео — название баннера, например RubUp.';
+  const have = new Set((await myBanners(env, owner)).map(b => b.name.toLowerCase()));
+  let name = base;
+  for (let i = 1; have.has(name.toLowerCase()); i++) name = `${base}_${i}`;
+  const fi = await tg(env, 'getFile', { file_id: f.file_id });
+  if (!fi.result?.file_path) return '❌ Не смог скачать файл из Telegram.';
+  const dl = await fetch(`https://api.telegram.org/file/bot${env.TG_BOT_TOKEN}/${fi.result.file_path}`);
+  const size = Number(dl.headers.get('Content-Length')) || f.file_size;
+  const rel = await bannerRelease(env);
+  if (!rel) return '❌ Нет доступа к релизу banners на GitHub.';
+  const { readable, writable } = new FixedLengthStream(size);
+  dl.body.pipeTo(writable);
+  const up = await gh(env, `https://uploads.github.com/repos/${env.GH_REPO}/releases/${rel.id}/assets?name=${encodeURIComponent(owner + '__' + name + '.mp4')}`,
+    { method: 'POST', headers: { 'Content-Type': 'video/mp4', 'Content-Length': String(size) }, body: readable });
+  if (!up.ok) return '❌ Не залился на GitHub: ' + up.status;
+  return `✅ Баннер «${name}» добавлен в твою библиотеку.\nВключить: /banner ${name}`;
+}
+async function bannerCmd(env, owner, arg) {
+  const list = await myBanners(env, owner);
+  const cur = await env.KV.get(`banner:${owner}`);
+  if (!arg) return (list.length ? '🎞 Твои баннеры:\n' + list.map(b => (b.name === cur ? '▶️ ' : '• ') + b.name).join('\n') : 'Библиотека пуста. Пришли видео баннера с подписью-названием.')
+    + `\n\nСейчас: ${cur || 'выключен'}\n/banner Имя — включить\n/banner stop — выключить\n/banner del Имя — удалить`;
+  if (/^(stop|стоп|off)$/i.test(arg)) { await env.KV.delete(`banner:${owner}`); return '⏹ Баннеры выключены.'; }
+  const del = arg.match(/^(?:del|delete|удалить)\s+(.+)$/i);
+  const find = n => list.find(b => b.name.toLowerCase() === bannerName(n).toLowerCase());
+  if (del) {
+    const b = find(del[1]); if (!b) return `Нет баннера «${del[1]}».`;
+    await gh(env, `/releases/assets/${b.id}`, { method: 'DELETE' });
+    if (cur === b.name) await env.KV.delete(`banner:${owner}`);
+    return `🗑 «${b.name}» удалён.`;
+  }
+  const b = find(arg);
+  if (!b) return `Нет баннера «${arg}». Твои: ${list.map(x => x.name).join(', ') || 'пусто'}`;
+  await env.KV.put(`banner:${owner}`, b.name);
+  return `▶️ Баннер «${b.name}» включён — он будет посередине всех следующих клипов.\nВыключить: /banner stop`;
+}
+
 async function tgHook(env, req) {
   if (req.headers.get('X-Telegram-Bot-Api-Secret-Token') !== await hmac(env, 'tghook')) return new Response('no', { status: 403 });
   const u = await req.json().catch(() => ({}));
   const m = u.message;
-  if (!m?.text) return new Response('ok');
-  const p = m.text.match(/^\/start ([a-z0-9_]+)-([0-9a-f]{16})$/);
+  if (!m) return new Response('ok');
+  const say = text => tg(env, 'sendMessage', { chat_id: m.chat.id, text });
+  const text = (m.text || '').trim();
+  const p = text.match(/^\/start ([a-z0-9_]+)-([0-9a-f]{16})$/);
   if (p && users(env)[p[1]] && (await hmac(env, 'tg:' + p[1])).slice(0, 16) === p[2]) {
     await kvPut(env, `tg:${p[1]}`, { chat: m.chat.id, name: m.from?.username || m.from?.first_name || '' });
-    await tg(env, 'sendMessage', { chat_id: m.chat.id, text: `✅ Готово, ${p[1]}! Сюда будут приходить описания после каждой публикации.` });
-  } else {
-    await tg(env, 'sendMessage', { chat_id: m.chat.id, text: 'Подключи бота из панели ClipFarm: «Мои аккаунты» → Telegram → Подключить.' });
+    await env.KV.put(`tgchat:${m.chat.id}`, p[1]);
+    await say(`✅ Готово, ${p[1]}! Сюда будут приходить описания после каждой публикации.\n\nБаннеры: пришли видео на зелёном фоне с подписью-названием, потом /banner Имя.`);
+    return new Response('ok');
   }
+  const owner = await ownerByChat(env, m.chat.id);
+  if (!owner) { await say('Подключи бота из панели ClipFarm: «Мои аккаунты» → Telegram → Подключить.'); return new Response('ok'); }
+  try {
+    if (m.video || m.animation || m.document) await say(await saveBanner(env, owner, m));
+    else if (/^\/banners?\b/i.test(text)) await say(await bannerCmd(env, owner, text.replace(/^\/banners?(@\w+)?/i, '').trim()));
+    else await say('Команды:\n/banner — мои баннеры\n/banner Имя — включить\n/banner stop — выключить\n/banner del Имя — удалить\n\nНовый баннер: пришли видео с подписью-названием.');
+  } catch (e) { await say('⚠️ Ошибка: ' + e.message); }
   return new Response('ok');
 }
 
@@ -312,6 +389,13 @@ export default {
     if (url.pathname === '/logout') return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': 'cf_auth=; Path=/; Max-Age=0' } });
 
     if (url.pathname === '/tg/hook' && req.method === 'POST') return tgHook(env, req);
+    const pb = url.pathname.match(/^\/pub\/banner\/([a-z0-9_]+)$/);
+    if (pb) {                                           // нарезчик спрашивает, какой баннер вставлять
+      const name = env.KV ? await env.KV.get(`banner:${pb[1]}`) : null;
+      if (!name) return json({});
+      const b = (await myBanners(env, pb[1])).find(x => x.name === name);
+      return json(b ? { name, asset: b.file, size: b.size } : {});
+    }
     const prov = url.pathname.match(/^\/oauth\/(youtube|tiktok)\/cb$/)?.[1];
     if (prov) return oauthCallback(env, prov, url);
 
@@ -464,7 +548,8 @@ function render(){
   const acc=(p,name,ico)=>{const a=S.accounts[p];return '<div class="row"><span style="font-size:20px">'+ico+'</span><b>'+name+(a?': '+esc(a.name):'')+'</b>'+
     (a?'<span class="mut">✅ подключён</span><button onclick="disc(\\''+p+'\\')">Отключить</button>':
      (S.oauth[p]&&S.kv?'<a class="btn go" href="'+(p==='telegram'?'/tg/connect" target="_blank':'/oauth/'+p+'/start')+'">Подключить</a>':'<span class="mut">не настроено в воркере</span>'))+'</div>'};
-  $('accts').innerHTML=acc('youtube','YouTube Shorts','▶️')+acc('tiktok','TikTok (в черновики)','🎵')+acc('telegram','Telegram (описания)','✈️');
+  $('accts').innerHTML=acc('youtube','YouTube Shorts','▶️')+acc('tiktok','TikTok (в черновики)','🎵')+acc('telegram','Telegram (описания, баннеры)','✈️')+
+    '<div class="row"><span style="font-size:20px">🎞</span><b>Баннер: '+(S.banner?esc(S.banner):'выключен')+'</b><span class="mut">управление в боте: /banner</span></div>';
   $('runs').innerHTML=S.active.length?S.active.map(r=>'<div class="row '+(r.status==='in_progress'?'':'q')+'"><span class="dot"></span><b>'+esc(r.title)+'</b>'+
     '<span class="mut">'+(r.status==='in_progress'?'идёт '+ago(r.started):'запускается…')+'</span><a href="'+r.url+'" target="_blank">лог</a>'+
     '<button class="no" onclick="stopRun('+r.id+',this)">■ Стоп</button></div>').join('')

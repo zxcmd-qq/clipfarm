@@ -389,6 +389,14 @@ def make_clip(job, args):
          "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
          "-movflags", "+faststart", str(final.resolve())], cwd=work)
 
+    # баннер пользователя (/banner Name в боте) — посередине, видео на паузе
+    try:
+        bpath = fetch_banner(args)
+        if bpath:
+            insert_banner(final, bpath, words, work)
+    except Exception as e:
+        print(f"[banner] пропуск: {e}", flush=True)
+
     # контекст для описания (можно скормить Gemini в автопосте)
     top = Counter(w for _, m in chat_lines for w in m.split()).most_common(8)
     (out_dir / f"{tag}.txt").write_text(
@@ -399,6 +407,84 @@ def make_clip(job, args):
     print(f"[cut] ✅ {final}", flush=True)
     if args.upload:
         upload(final, args, [w for w, _ in top])
+
+# ---------------------------------------------------------------- banners
+API = os.environ.get("CLIPFARM_API", "https://clipfarm.osttima.workers.dev")
+
+def fetch_banner(args):
+    """Какой баннер сейчас включён у владельца (спрашиваем панель), качаем из релиза banners."""
+    if not args.owner:
+        return None
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"{API}/pub/banner/{args.owner}", headers={"User-Agent": "clipfarm-runner"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            info = json.loads(r.read() or b"{}")
+    except Exception as e:
+        print(f"[banner] панель не ответила: {e}", flush=True)
+        return None
+    asset = info.get("asset")
+    if not asset:
+        return None
+    cache = Path.home() / ".cache" / "clipfarm" / "banners"
+    cache.mkdir(parents=True, exist_ok=True)
+    local = cache / asset
+    if not local.exists() or local.stat().st_size != info.get("size"):
+        r = subprocess.run(["gh", "release", "download", "banners", "-p", asset, "-D", str(cache), "--clobber"],
+                           capture_output=True, text=True)
+        if r.returncode or not local.exists():
+            print(f"[banner] не скачался {asset}: {r.stderr[-200:]}", flush=True)
+            return None
+    print(f"[banner] вставляю {info.get('name')}", flush=True)
+    return local
+
+def _dur(p):
+    return float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                          "-of", "csv=p=0", str(p)], text=True).strip() or 0)
+
+def _green(p):
+    """Цвет фона баннера — из угла первого кадра (если он зелёный)."""
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(p), "-vf", "crop=16:16:0:0,scale=1:1", "-frames:v", "1",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+    if len(raw) >= 3 and raw[1] > raw[0] + 40 and raw[1] > raw[2] + 40:
+        return "0x%02X%02X%02X" % (raw[0], raw[1], raw[2])
+    return "0x00FF00"
+
+def insert_banner(final, banner, words, work):
+    """[клип до T] + [стоп-кадр T, поверх баннер без зелени, звук баннера] + [клип после T]."""
+    total, bdur = _dur(final), _dur(banner)
+    if total < 6 or bdur <= 0:
+        return
+    mid = total / 2
+    # ставим паузу в промежуток между фразами, ближайший к середине
+    gaps = [(words[i][1] + words[i + 1][0]) / 2 for i in range(len(words) - 1)
+            if words[i + 1][0] - words[i][1] > 0.15] if words else []
+    T = min(gaps, key=lambda g: abs(g - mid)) if gaps else mid
+    if abs(T - mid) > total * 0.25:
+        T = mid
+    has_audio = bool(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                                     "-of", "csv=p=0", str(banner)], capture_output=True, text=True).stdout.strip())
+    key = f"chromakey={_green(banner)}:0.2:0.08,despill=type=green"
+    out = work / "with_banner.mp4"
+    a_banner = "[1:a]aresample=48000,aformat=channel_layouts=stereo,apad[ba];[ba]atrim=0:{d}[a1];".format(d=bdur) if has_audio \
+        else "anullsrc=r=48000:cl=stereo,atrim=0:{d}[a1];".format(d=bdur)
+    fc = (
+        f"[0:v]fps=30,split=3[va][vf][vb];"
+        f"[va]trim=0:{T},setpts=PTS-STARTPTS[v0];"
+        f"[vf]trim=start={T},setpts=PTS-STARTPTS,trim=end_frame=1,loop=loop=-1:size=1,trim=0:{bdur},setpts=PTS-STARTPTS[frz];"
+        f"[1:v]fps=30,scale=1080:1920:force_original_aspect_ratio=decrease,{key}[bn];"
+        f"[frz][bn]overlay=(W-w)/2:(H-h)/2:eof_action=pass,format=yuv420p[v1];"
+        f"[vb]trim=start={T},setpts=PTS-STARTPTS[v2];"
+        f"[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[aa][ab];"
+        f"[aa]atrim=0:{T},asetpts=PTS-STARTPTS[a0];"
+        f"[ab]atrim=start={T},asetpts=PTS-STARTPTS[a2];"
+        + a_banner +
+        f"[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]"
+    )
+    run(["ffmpeg", "-y", "-i", str(final), "-i", str(banner), "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)])
+    shutil.move(str(out), str(final))
 
 def upload(final, args, peak):
     """Облако: клип -> GitHub-релиз (панель берёт его оттуда) + пинг в Telegram."""
