@@ -657,6 +657,7 @@ def main():
     ap.add_argument("--keep-rec", action="store_true", help="не удалять запись стрима после стопа")
     ap.add_argument("--font", default=os.environ.get("SUB_FONT", "Arial Black"))
     ap.add_argument("--platform", default="twitch", choices=["twitch", "kick"])
+    ap.add_argument("--offgame-min", type=float, default=15, help="выключиться, если столько минут не та игра")
     ap.add_argument("--only-game", default="", help="резать только когда на стриме эта игра (напр. Counter-Strike)")
     ap.add_argument("--owner", default="", help="владелец клипов (пользователь панели)")
     ap.add_argument("--upload", default="", help="имя GitHub-релиза для заливки клипов (облако)")
@@ -677,6 +678,7 @@ def main():
     det = Detector(mult=args.mult, min_msgs=args.min_msgs, cooldown=args.cooldown)
     q = queue.Queue(); threading.Thread(target=cutter_worker, args=(q, args, rec), daemon=True).start()
     t_start, exit_code = time.time(), 0
+    game_seen = time.time()          # когда последний раз видели нужную игру
     recent = deque()  # сообщения за последнюю минуту — для .txt
 
     def _stop(*_):
@@ -702,11 +704,19 @@ def main():
                 recent.popleft()
             if rec.file is None:
                 continue            # стрим оффлайн — не считаем
+            # стример давно не в нужной игре — выключаемся; «Авто» в панели перезапустит, когда вернётся
+            if args.only_game:
+                if game_ok(ch, args.only_game, args.platform):
+                    game_seen = now
+                elif now - game_seen > args.offgame_min * 60:
+                    print(f"[stop] {args.offgame_min:.0f} мин не {args.only_game} (сейчас {_game['name'] or '?'}) — выключаюсь, "
+                          "«Авто» запустит снова, когда стример вернётся в игру", flush=True)
+                    break
             spike, score = det.feed(msgs, now)
             print(f"[{time.strftime('%H:%M:%S')}] сообщений за {args.bucket}с: "
                   f"{len(msgs):3d}  score {score:5.1f}" + ("  🔥 ВСПЛЕСК" if spike else ""), flush=True)
             if spike and args.only_game and not game_ok(ch, args.only_game, args.platform):
-                print(f"[game] сейчас не {args.only_game} — клип пропущен", flush=True)
+                print(f"[game] сейчас {_game['name'] or '?'}, а не {args.only_game} — клип пропущен", flush=True)
                 spike = False
             if spike:
                 offset = now - rec.t0

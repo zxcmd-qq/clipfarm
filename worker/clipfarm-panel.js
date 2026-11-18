@@ -148,7 +148,7 @@ async function state(env, me) {
   const clips = assets.map(a => ({ id: a.id, name: a.name, label: a.label || '', size: a.size, created: a.created_at, ...parseName(env, a.name) }))
     .filter(c => c.owner === me).sort((a, b) => b.created.localeCompare(a.created));
   return {
-    me, login: (await cred(env, me))?.login || me, active, recent, banner,
+    me, login: (await cred(env, me))?.login || me, settings: await settings(env, me), active, recent, banner,
     fresh: clips.filter(c => c.stage === 'fresh'),
     approved: clips.filter(c => c.stage === 'approved').reverse(),       // очередь: старые первыми
     posted: clips.filter(c => c.stage === 'posted').slice(0, 30),
@@ -726,10 +726,15 @@ async function liveState(env, me) {
   return { favs: list, discover: disc.map(d => ({ ...d, fav: favs.some(f => f.p === d.p && f.ch === d.ch), running: isRun(d.p, d.ch) })) };
 }
 
+// настройки аккаунта: фильтр игры один на всё (ручной запуск, «Авто», витрина)
+const GAME_DEFAULT = 'Counter-Strike';
+async function settings(env, u) { return { game: GAME_DEFAULT, ...((await kvGet(env, `settings:${u}`)) || {}) }; }
+
 async function dispatchClip(env, owner, p, ch, opts = {}) {
+  const game = (await settings(env, owner)).game;
   return gh(env, `/actions/workflows/${WF}/dispatches`, { method: 'POST',
     body: JSON.stringify({ ref: 'main', inputs: { channel: ch, platform: p, owner, model: opts.model || 'medium', mult: String(opts.mult || '2.5'),
-      only_game: opts.game ?? 'Counter-Strike', part: '1' } }) });
+      only_game: game, part: '1' } }) });
 }
 
 // крон каждые 5 минут: у кого включено «Авто» и стример вышел в эфир с CS2 — запускаем нарезку
@@ -742,7 +747,8 @@ async function autoStart(env) {
     const tw = await twitchLive(favs.filter(f => f.p === 'twitch').map(f => f.ch));
     for (const f of favs) {
       const st = f.p === 'twitch' ? tw[f.ch] : await kickLive(f.ch);
-      if (!st?.live || !/counter-strike/i.test(st.game || '')) continue;
+      const want = (await settings(env, u)).game;
+      if (!st?.live || (want && !(st.game || '').toLowerCase().includes(want.toLowerCase()))) continue;
       if (titles.some(t => t.startsWith(runKey(u, f.p, f.ch).replace(/ $/, '')))) continue;
       if (await env.KV.get(`nostart:${u}:${f.p}:${f.ch}`)) continue;                // вручную остановил — не лезем до конца стрима
       const r = await dispatchClip(env, u, f.p, f.ch);
@@ -822,7 +828,14 @@ export default {
         if (!st) return json({ error: 'Не понял ссылку. Пример: twitch.tv/shadowkekw или kick.com/ник' }, 400);
         await env.KV.delete(`nostart:${me}:${st.p}:${st.ch}`);
         const r = await dispatchClip(env, me, st.p, st.ch, b);
-        return r.status === 204 ? json({ ok: true, channel: st.ch + (st.p === 'kick' ? ' (Kick)' : '') })
+        let note = '';
+        const want = (await settings(env, me)).game;
+        if (r.status === 204 && st.p === 'twitch' && want) {
+          const g = (await twitchLive([st.ch]))[st.ch];
+          if (g && !g.live) note = 'сейчас офлайн — начну, когда выйдет в эфир';
+          else if (g?.game && !g.game.toLowerCase().includes(want.toLowerCase())) note = `сейчас играет в ${g.game} — клипы пойдут, только когда переключится на CS2`;
+        }
+        return r.status === 204 ? json({ ok: true, channel: st.ch + (st.p === 'kick' ? ' (Kick)' : ''), note })
           : json({ error: `GitHub ответил ${r.status}: ${(await r.text()).slice(0, 200)}` }, 500);
       }
       if (url.pathname === '/api/stop') {
@@ -851,6 +864,12 @@ export default {
         return json({ ok: r.status === 204 });
       }
       if (url.pathname === '/api/publish') return json(await publishNext(env, me));
+      if (url.pathname === '/api/settings') {
+        const cur = await settings(env, me);
+        if ('game' in b) cur.game = b.game ? GAME_DEFAULT : '';
+        await kvPut(env, `settings:${me}`, cur);
+        return json({ ok: true, settings: cur });
+      }
       if (url.pathname === '/api/fav') {
         let favs = (await kvGet(env, `fav:${me}`)) || [];
         const st = b.p && b.ch ? { p: b.p, ch: String(b.ch).toLowerCase() } : streamFrom(b.url);
@@ -1161,11 +1180,10 @@ h1.title{animation:enter .6s var(--ease) both}
     <div class="row" style="padding:0 16px"><button id="optbtn" onclick="$('opts').classList.toggle('hide');allInd();this.textContent=$('opts').classList.contains('hide')?'Параметры':'Скрыть параметры'" style="font-size:15px;padding:10px 0">Параметры</button></div>
     <div class="opts hide" id="opts">
       <div><label>Субтитры</label><div class="seg" id="seg-model"><button data-v="small">Быстрые</button><button data-v="medium" class="on">Точные</button><button data-v="large-v3-turbo">Макс.</button></div></div>
-      <div><label>Игра</label><div class="seg" id="seg-game"><button data-v="Counter-Strike" class="on">Только CS2</button><button data-v="">Любая</button></div></div>
       <div><label>Сколько клипов</label><div class="seg" id="seg-mult"><button data-v="3.5">Меньше</button><button data-v="2.5" class="on">Норм</button><button data-v="2">Больше</button></div></div>
     </div>
   </div>
-  <div class="foot">twitch.tv/ник, kick.com/ник или просто ник (= Twitch). Клипы начнут приходить после первых всплесков чата.</div>
+  <div class="foot"><span id="game-chip"></span><br>twitch.tv/ник, kick.com/ник или просто ник (= Twitch). Клипы начнут приходить после первых всплесков чата.</div>
   <div class="sec">Мои стримеры</div>
   <div class="group">
     <div class="input-row"><input id="fav-url" placeholder="Добавить: ссылка Twitch / Kick или ник" autocapitalize="none" autocomplete="off">
@@ -1202,6 +1220,10 @@ h1.title{animation:enter .6s var(--ease) both}
   <div class="sec">Аккаунты для постинга</div>
   <div class="group" id="accts"></div>
   <div class="foot">TikTok получает клипы в черновики: открой «Входящие» в приложении и опубликуй. Текст для поста приходит в Telegram.</div>
+  <div class="sec">Фильтр игры</div>
+  <div class="group"><div class="row ico"><span class="badge" style="background:#ff9500">🎯</span><div class="main"><div class="t">Только CS2</div><div class="s" id="game-sub"></div></div>
+    <div class="sw" id="game-sw" onclick="toggleGame(this)"></div></div></div>
+  <div class="foot">Один переключатель на весь аккаунт: действует и на ручной запуск, и на «Авто». Нарезки, которые уже идут, подхватят его при следующем запуске. Если стример 15 минут не в CS2 — нарезка выключится, а «Авто» включит её снова, когда он вернётся.</div>
   <div class="sec">Баннер</div>
   <div class="group"><div class="row ico"><span class="badge" style="background:#af52de">🎞</span><div class="main"><div class="t" id="banner-now"></div><div class="s">Управление в боте: /banner</div></div></div></div>
   <div class="foot">Пришли боту видео на зелёном фоне — он спросит название. Потом <b>/banner Имя</b> — и баннер будет посередине каждого нового клипа. <b>/banner stop</b> — выключить.</div>
@@ -1243,13 +1265,13 @@ window.addEventListener('resize',()=>{movePill();allInd()});
 window.addEventListener('hashchange',()=>show(location.hash.slice(1)));
 function seg(id,cb){const el=$(id);segInd(el);el.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;el.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));segInd(el);cb&&cb(b.dataset.v)})}
 const segv=id=>$(id).querySelector('.on').dataset.v;
-seg('seg-model');seg('seg-mult');seg('seg-game');seg('seg-clips',v=>{CLIPTAB=v;$('clips').innerHTML='';render()});
+seg('seg-model');seg('seg-mult');seg('seg-clips',v=>{CLIPTAB=v;$('clips').innerHTML='';render()});
 
 // статус
 $('url').addEventListener('keydown',e=>{if(e.key==='Enter')startCh()});
 async function startCh(){const b=$('go');b.disabled=true;
-  const r=await api('/api/start',{url:$('url').value,model:segv('seg-model'),mult:segv('seg-mult'),game:segv('seg-game')});b.disabled=false;
-  if(r.error)toast(r.error);else{$('url').value='';toast('▶ '+r.channel+' запускается — пара минут');setTimeout(refresh,3000)}}
+  const r=await api('/api/start',{url:$('url').value,model:segv('seg-model'),mult:segv('seg-mult')});b.disabled=false;
+  if(r.error)toast(r.error);else{$('url').value='';toast(r.note?'⚠️ '+r.channel+': '+r.note:'▶ '+r.channel+' запускается — пара минут');setTimeout(refresh,3000)}}
 async function stopRun(id,btn){btn.disabled=true;btn.textContent='Стоп…';await api('/api/stop',{id});toast('Останавливаю — до минуты');setTimeout(refresh,4000)}
 function renderStatus(){
   $('active').innerHTML=S.active.length?S.active.map(r=>'<div class="row"><span class="live '+(r.status==='in_progress'?'':'q')+'"></span><div class="main"><div class="t">'+esc(r.title.replace('🎬 ',''))+'</div><div class="s">'+(r.status==='in_progress'?'идёт '+dur(r.started,Date.now()):'запускается…')+' · <a href="'+r.url+'" target="_blank">лог</a></div></div><button class="btn sm red" onclick="stopRun('+r.id+',this)">Стоп</button></div>').join('')
@@ -1283,8 +1305,8 @@ $('fav-url').addEventListener('keydown',e=>{if(e.key==='Enter')addFav()});
 async function delFav(p,ch){if(!confirm('Убрать '+ch+' из списка?'))return;await api('/api/fav',{p,ch,action:'del'});loadLive()}
 async function favD(p,ch,b){b.disabled=true;await api('/api/fav',{p,ch});toast('★ '+ch+' в списке');loadLive()}
 async function autoFav(p,ch,el){const on=!el.classList.contains('on');el.classList.toggle('on',on);await api('/api/fav',{p,ch,action:'auto',auto:on});toast(on?'Авто включено для '+ch:'Авто выключено')}
-async function startFav(p,ch,b){b.disabled=true;b.textContent='…';const r=await api('/api/start',{p,ch,model:segv('seg-model'),mult:segv('seg-mult'),game:segv('seg-game')});
-  if(r.error){b.disabled=false;b.textContent='Резать';return toast(r.error)}toast('▶ '+r.channel+' запускается');setTimeout(()=>{refresh();loadLive()},3000)}
+async function startFav(p,ch,b){b.disabled=true;b.textContent='…';const r=await api('/api/start',{p,ch,model:segv('seg-model'),mult:segv('seg-mult')});
+  if(r.error){b.disabled=false;b.textContent='Резать';return toast(r.error)}toast(r.note?'⚠️ '+r.channel+': '+r.note:'▶ '+r.channel+' запускается');setTimeout(()=>{refresh();loadLive()},3000)}
 
 // клипы
 async function act(c,body){const el=document.querySelector('[data-id="'+c.id+'"]');if(el){el.querySelector('video')?.pause();el.classList.add('out');setTimeout(()=>el.remove(),300)}
@@ -1328,8 +1350,11 @@ function renderSettings(){
     (a?'<button style="color:var(--red);font-size:15px" onclick="disc(\\''+p+'\\')">Отключить</button>':(S.oauth[p]&&S.kv?'<a class="btn sm" href="'+(p==='telegram'?'/tg/connect" target="_blank':'/oauth/'+p+'/start')+'">Подключить</a>':'<span class="v" style="font-size:14px">не настроено</span>'))+'</div>';
   $('accts').innerHTML=row('youtube','YouTube Shorts','#ff0000','▶',A.youtube)+row('tiktok','TikTok','#000','♪',A.tiktok,A.tiktok&&!A.tiktok.stats?' · <a href="/oauth/tiktok/start?stats=1">включить статистику</a>':'')+row('telegram','Telegram-бот','#2aabee','✈',A.telegram);
   $('banner-now').textContent=S.banner?'Включён: '+S.banner:'Выключен';
+  const g=!!S.settings?.game;$('game-sw').classList.toggle('on',g);$('game-sub').textContent=g?'клипы только когда стример в Counter-Strike':'любая игра';
+  $('game-chip').innerHTML=g?'🎯 Только CS2 · <a href="#settings">изменить</a>':'🎮 Любая игра · <a href="#settings">изменить</a>';
   if(document.activeElement!==$('f-login')&&!$('f-login').value)$('f-login').value=S.login;
 }
+async function toggleGame(el){const on=!el.classList.contains('on');el.classList.toggle('on',on);const r=await api('/api/settings',{game:on});S.settings=r.settings;renderSettings();toast(on?'🎯 Только CS2 — для всех запусков':'🎮 Любая игра — для всех запусков')}
 async function saveAccount(btn){btn.disabled=true;const r=await api('/api/account',{login:$('f-login').value,password:$('f-pass').value,current:$('f-cur').value});btn.disabled=false;
   $('acc-msg').innerHTML=r.ok?'<span style="color:var(--green)">✓ Сохранено. Логин: '+esc(r.login)+'</span>':'<span class="err">'+esc(r.error)+'</span>';if(r.ok){$('f-pass').value='';$('f-cur').value='';refresh()}}
 
