@@ -664,9 +664,102 @@ async function publishNext(env, owner) {
   return { owner, ...entry, left: queue.length - (ok ? 1 : 0) };
 }
 
+// ---------------- стримеры: избранное, лайв-статусы, витрина CS2, автозапуск
+// платформа + ник из ссылки: twitch.tv/x, kick.com/x, просто ник (= Twitch)
+function streamFrom(s) {
+  s = String(s || '').trim();
+  let m = s.match(/kick\.com\/([A-Za-z0-9_-]{2,30})/i);
+  if (m) return { p: 'kick', ch: m[1].toLowerCase() };
+  m = s.match(/twitch\.tv\/([A-Za-z0-9_]{3,25})/i);
+  const n = (m ? m[1] : s.replace(/^@/, ''));
+  return /^[A-Za-z0-9_]{3,25}$/.test(n) ? { p: 'twitch', ch: n.toLowerCase() } : null;
+}
+const GQL = q => fetch('https://gql.twitch.tv/gql', { method: 'POST', headers: { 'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko', 'Content-Type': 'application/json' },
+  body: JSON.stringify({ query: q }) }).then(r => r.json()).catch(() => ({}));
+
+async function twitchLive(logins) {
+  if (!logins.length) return {};
+  const d = await GQL(`query{users(logins:${JSON.stringify(logins)}){login displayName profileImageURL(width:70) stream{viewersCount title game{name} previewImageURL(width:320,height:180)}}}`);
+  const out = {};
+  for (const u of d.data?.users || []) if (u) out[u.login.toLowerCase()] = { name: u.displayName, avatar: u.profileImageURL,
+    live: !!u.stream, viewers: u.stream?.viewersCount || 0, title: u.stream?.title || '', game: u.stream?.game?.name || '', preview: u.stream?.previewImageURL || '' };
+  return out;
+}
+async function kickLive(slug) {
+  try {
+    const r = await fetch(`https://kick.com/api/v2/channels/${slug}`, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36', Accept: 'application/json' } });
+    if (!r.ok) return { unknown: true };
+    const d = await r.json(), ls = d.livestream;
+    return { name: d.user?.username || slug, avatar: d.user?.profile_pic || '', live: !!ls?.is_live, viewers: ls?.viewer_count || 0, title: ls?.session_title || '',
+      game: (ls?.categories || []).map(c => c.name).join(', '), preview: ls?.thumbnail?.url || '' };
+  } catch (e) { return { unknown: true }; }
+}
+async function discover() {
+  const cached = await kvGet(env_global, 'discover');
+  if (cached && Date.now() - cached.t < 120e3) return cached.list;
+  const d = await GQL(`query{game(name:"Counter-Strike"){streams(first:100){edges{node{viewersCount title previewImageURL(width:320,height:180) broadcaster{login displayName profileImageURL(width:70) broadcastSettings{language}}}}}}}`);
+  const all = (d.data?.game?.streams?.edges || []).map(e => e.node).filter(n => n?.broadcaster);
+  const ru = all.filter(n => String(n.broadcaster.broadcastSettings?.language || '').toUpperCase() === 'RU');
+  const list = (ru.length ? ru : all).slice(0, 15).map(n => ({ p: 'twitch', ch: n.broadcaster.login.toLowerCase(), name: n.broadcaster.displayName, avatar: n.broadcaster.profileImageURL,
+    viewers: n.viewersCount, title: n.title, preview: n.previewImageURL, live: true, game: 'Counter-Strike' }));
+  await kvPut(env_global, 'discover', { t: Date.now(), list });
+  return list;
+}
+let env_global = null;
+
+async function activeRuns(env) {
+  const r = await gh(env, `/actions/workflows/${WF}/runs?per_page=50`);
+  return r.ok ? (await r.json()).workflow_runs.filter(x => x.status !== 'completed') : [];
+}
+const runKey = (owner, p, ch) => `🎬 ${ch}${p === 'kick' ? ' [Kick]' : ''} · ${owner} `;
+
+async function liveState(env, me) {
+  const favs = (await kvGet(env, `fav:${me}`)) || [];
+  const [tw, runs, disc, ...kk] = await Promise.all([
+    twitchLive(favs.filter(f => f.p === 'twitch').map(f => f.ch)), activeRuns(env), discover(),
+    ...favs.filter(f => f.p === 'kick').map(f => kickLive(f.ch)) ]);
+  const kmap = {}; favs.filter(f => f.p === 'kick').forEach((f, i) => kmap[f.ch] = kk[i]);
+  const running = new Set(runs.map(r => r.display_title || '').filter(t => t.includes(`· ${me} `)));
+  const isRun = (p, ch) => [...running].some(t => t.startsWith(runKey(me, p, ch).replace(/ $/, '')));
+  const list = favs.map(f => ({ ...f, ...(f.p === 'twitch' ? (tw[f.ch] || { name: f.ch }) : (kmap[f.ch] || { name: f.ch, unknown: true })), running: isRun(f.p, f.ch) }))
+    .sort((a, b) => (b.live - a.live) || (b.viewers - a.viewers));
+  return { favs: list, discover: disc.map(d => ({ ...d, fav: favs.some(f => f.p === d.p && f.ch === d.ch), running: isRun(d.p, d.ch) })) };
+}
+
+async function dispatchClip(env, owner, p, ch, opts = {}) {
+  return gh(env, `/actions/workflows/${WF}/dispatches`, { method: 'POST',
+    body: JSON.stringify({ ref: 'main', inputs: { channel: ch, platform: p, owner, model: opts.model || 'medium', mult: String(opts.mult || '2.5'),
+      only_game: opts.game ?? 'Counter-Strike', part: '1' } }) });
+}
+
+// крон каждые 5 минут: у кого включено «Авто» и стример вышел в эфир с CS2 — запускаем нарезку
+async function autoStart(env) {
+  const runs = await activeRuns(env);
+  const titles = runs.map(r => r.display_title || '');
+  for (const u of Object.keys(users(env))) {
+    const favs = ((await kvGet(env, `fav:${u}`)) || []).filter(f => f.auto);
+    if (!favs.length) continue;
+    const tw = await twitchLive(favs.filter(f => f.p === 'twitch').map(f => f.ch));
+    for (const f of favs) {
+      const st = f.p === 'twitch' ? tw[f.ch] : await kickLive(f.ch);
+      if (!st?.live || !/counter-strike/i.test(st.game || '')) continue;
+      if (titles.some(t => t.startsWith(runKey(u, f.p, f.ch).replace(/ $/, '')))) continue;
+      if (await env.KV.get(`nostart:${u}:${f.p}:${f.ch}`)) continue;                // вручную остановил — не лезем до конца стрима
+      const r = await dispatchClip(env, u, f.p, f.ch);
+      if (r.status === 204) {
+        await env.KV.put(`nostart:${u}:${f.p}:${f.ch}`, 'auto', { expirationTtl: 20 * 60 });   // не дёргать повторно, пока раннер стартует
+        const t = await kvGet(env, `tg:${u}`);
+        if (t && env.TG_BOT_TOKEN) await tg(env, 'sendMessage', { chat_id: t.chat, text: `🔴 ${st.name || f.ch} в эфире (${st.game}, ${st.viewers} зрителей) — начал резать автоматически.` });
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------- router
 export default {
   async scheduled(event, env, ctx) {
+    env_global = env;
+    if (event.cron && event.cron.startsWith('*/')) { ctx.waitUntil(autoStart(env).catch(e => console.log('auto', e.message))); return; }
     ctx.waitUntil((async () => { for (const u of Object.keys(users(env))) {
       try { await publishNext(env, u); } catch (e) {}
       try { await refreshStats(env, u); } catch (e) {}
@@ -674,6 +767,7 @@ export default {
   },
 
   async fetch(req, env, ctx) {
+    env_global = env;
     const url = new URL(req.url);
 
     if (url.pathname === '/login' && req.method === 'POST') {
@@ -714,6 +808,7 @@ export default {
     }
     if (url.pathname === '/tg/connect') return tgConnect(env, me);
     if (url.pathname === '/api/state') return json(await state(env, me));
+    if (url.pathname === '/api/live') return json(await liveState(env, me));
     if (url.pathname === '/api/stats') {
       let st = await kvGet(env, `stats:${me}`);
       if (!st || url.searchParams.get('refresh') || Date.now() - new Date(st.updated) > 3 * 3600e3) st = await refreshStats(env, me);
@@ -723,17 +818,19 @@ export default {
     if (req.method === 'POST') {
       const b = await req.json().catch(() => ({}));
       if (url.pathname === '/api/start') {
-        const ch = channelFrom(b.url);
-        if (!ch) return json({ error: 'Не понял ссылку. Пример: twitch.tv/shadowkekw' }, 400);
-        const r = await gh(env, `/actions/workflows/${WF}/dispatches`, { method: 'POST',
-          body: JSON.stringify({ ref: 'main', inputs: { channel: ch, owner: me, model: b.model || 'medium', mult: String(b.mult || '2.5'), only_game: b.game ?? 'Counter-Strike', part: '1' } }) });
-        return r.status === 204 ? json({ ok: true, channel: ch })
+        const st = b.p && b.ch ? { p: b.p, ch: b.ch } : streamFrom(b.url);
+        if (!st) return json({ error: 'Не понял ссылку. Пример: twitch.tv/shadowkekw или kick.com/ник' }, 400);
+        await env.KV.delete(`nostart:${me}:${st.p}:${st.ch}`);
+        const r = await dispatchClip(env, me, st.p, st.ch, b);
+        return r.status === 204 ? json({ ok: true, channel: st.ch + (st.p === 'kick' ? ' (Kick)' : '') })
           : json({ error: `GitHub ответил ${r.status}: ${(await r.text()).slice(0, 200)}` }, 500);
       }
       if (url.pathname === '/api/stop') {
         const run = await gh(env, `/actions/runs/${Number(b.id)}`).then(r => r.json());
         if (!(run.display_title || '').includes(`· ${me} `) && me !== firstUser(env)) return json({ error: 'не твой запуск' }, 403);
         const r = await gh(env, `/actions/runs/${Number(b.id)}/cancel`, { method: 'POST' });
+        const mm = (run.display_title || '').match(/^🎬 ([\w-]+)( \[Kick\])? ·/);
+        if (mm) await env.KV.put(`nostart:${me}:${mm[2] ? 'kick' : 'twitch'}:${mm[1]}`, 'manual', { expirationTtl: 12 * 3600 });
         return json({ ok: r.status === 202 });
       }
       // действия с клипом — только со своими
@@ -754,6 +851,17 @@ export default {
         return json({ ok: r.status === 204 });
       }
       if (url.pathname === '/api/publish') return json(await publishNext(env, me));
+      if (url.pathname === '/api/fav') {
+        let favs = (await kvGet(env, `fav:${me}`)) || [];
+        const st = b.p && b.ch ? { p: b.p, ch: String(b.ch).toLowerCase() } : streamFrom(b.url);
+        if (!st) return json({ error: 'Не понял ссылку. Пример: twitch.tv/ник или kick.com/ник' }, 400);
+        const i = favs.findIndex(f => f.p === st.p && f.ch === st.ch);
+        if (b.action === 'del') favs = favs.filter((_, k) => k !== i);
+        else if (b.action === 'auto') { if (i >= 0) favs[i].auto = !!b.auto; }
+        else if (i < 0) favs.push({ ...st, auto: false });
+        await kvPut(env, `fav:${me}`, favs.slice(0, 60));
+        return json({ ok: true });
+      }
       if (url.pathname === '/api/account') {
         const r = await changeAccount(env, me, b);
         return r.ok ? new Response(JSON.stringify(r), { headers: { 'Content-Type': 'application/json', 'Set-Cookie': await cookieFor(env, me) } }) : json(r, 400);
@@ -948,6 +1056,27 @@ h1.title{font-size:34px;font-weight:700;letter-spacing:.2px;margin:10px 4px 18px
 .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
 @media (min-width:900px){.toast{bottom:30px;left:calc(50% + 125px)}}
 .hide{display:none!important}
+
+/* стримеры */
+.ava{width:40px;height:40px;border-radius:50%;object-fit:cover;flex:none;background:var(--fill)}
+.ava-wrap{position:relative;flex:none}.ava-wrap .pf{position:absolute;right:-3px;bottom:-3px;width:17px;height:17px;border-radius:6px;font-size:10px;font-weight:800;color:#fff;display:flex;align-items:center;justify-content:center;border:2px solid var(--card)}
+.pf.twitch{background:#9146ff}.pf.kick{background:#53fc18;color:#000}
+.ava-wrap.onair .ava{box-shadow:0 0 0 2px var(--card),0 0 0 4px var(--red)}
+.lv{color:var(--red);font-weight:600}
+.sw{position:relative;width:46px;height:28px;border-radius:999px;background:var(--fill);flex:none;transition:background .3s}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.25);transition:transform .35s var(--spring)}
+.sw.on{background:var(--green)}.sw.on::after{transform:translateX(18px)}
+.swl{font-size:11px;color:var(--label2);text-align:center;margin-top:2px}
+.x{color:var(--label3);font-size:20px;padding:0 2px;line-height:1}
+.shelf{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;padding:2px 2px 10px;margin:0 -2px;-webkit-overflow-scrolling:touch}
+.shelf::-webkit-scrollbar{display:none}
+.scard{flex:0 0 220px;scroll-snap-align:start;border-radius:18px;overflow:hidden;position:relative;background:var(--glass)!important;-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);border:1px solid var(--rim2);box-shadow:var(--shadow),inset 0 1px 0 var(--rim);animation:pop .5s var(--ease) both}
+.scard img.pv{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000}
+.scard .vw{position:absolute;top:8px;left:8px;background:rgba(0,0,0,.6);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);color:#fff;font-size:12px;font-weight:600;padding:3px 8px;border-radius:999px}
+.scard .vw::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:#ff3b30;margin-right:5px;vertical-align:1px}
+.scard .b{padding:9px 11px 11px;display:flex;align-items:center;gap:9px}.scard .b .main{flex:1;min-width:0}
+.scard .t{font-weight:600;font-size:15px}.scard .s{font-size:12px;color:var(--label2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scard .acts{display:flex;gap:6px;padding:0 11px 11px}.scard .acts .btn{flex:1;height:34px;font-size:13.5px;white-space:nowrap;padding:0 8px}
 /* ===== Liquid Glass ===== */
 :root{--glass:rgba(255,255,255,.58);--glass2:rgba(255,255,255,.72);--rim:rgba(255,255,255,.75);--rim2:rgba(255,255,255,.18);--shadow:0 8px 32px rgba(31,38,135,.10),0 1px 2px rgba(0,0,0,.04);--blur:saturate(190%) blur(26px);
   --ease:cubic-bezier(.2,.9,.25,1);--spring:cubic-bezier(.34,1.56,.64,1)}
@@ -1027,7 +1156,7 @@ h1.title{animation:enter .6s var(--ease) both}
   <h1 class="title">Статус</h1>
   <div class="sec">Новый стрим</div>
   <div class="group">
-    <div class="input-row"><input id="url" placeholder="Ссылка на Twitch или ник" autocapitalize="none" autocomplete="off" inputmode="url">
+    <div class="input-row"><input id="url" placeholder="Ссылка на Twitch / Kick или ник" autocapitalize="none" autocomplete="off" inputmode="url">
       <button class="btn sm" id="go" onclick="startCh()">Запустить</button></div>
     <div class="row" style="padding:0 16px"><button id="optbtn" onclick="$('opts').classList.toggle('hide');allInd();this.textContent=$('opts').classList.contains('hide')?'Параметры':'Скрыть параметры'" style="font-size:15px;padding:10px 0">Параметры</button></div>
     <div class="opts hide" id="opts">
@@ -1036,7 +1165,16 @@ h1.title{animation:enter .6s var(--ease) both}
       <div><label>Сколько клипов</label><div class="seg" id="seg-mult"><button data-v="3.5">Меньше</button><button data-v="2.5" class="on">Норм</button><button data-v="2">Больше</button></div></div>
     </div>
   </div>
-  <div class="foot">Вставь ссылку вида twitch.tv/shadowkekw. Клипы начнут приходить после первых всплесков чата.</div>
+  <div class="foot">twitch.tv/ник, kick.com/ник или просто ник (= Twitch). Клипы начнут приходить после первых всплесков чата.</div>
+  <div class="sec">Мои стримеры</div>
+  <div class="group">
+    <div class="input-row"><input id="fav-url" placeholder="Добавить: ссылка Twitch / Kick или ник" autocapitalize="none" autocomplete="off">
+      <button class="btn sm gray" onclick="addFav()">＋</button></div>
+    <div id="favs"></div>
+  </div>
+  <div class="foot">«Авто» — сам начну резать, когда стример выйдет в эфир с CS2 (проверка каждые 5 минут), и напишу в Telegram.</div>
+  <div class="sec">Сейчас в эфире · CS2</div>
+  <div class="shelf" id="discover"><div class="empty" style="width:100%">Загружаю…</div></div>
   <div class="sec">Сейчас режется</div>
   <div class="group" id="active"></div>
   <div class="sec">История запусков</div>
@@ -1120,6 +1258,33 @@ function renderStatus(){
   $('history').innerHTML=S.recent.length?S.recent.map(r=>{const[bg,ch]=icon(r.conclusion);return '<a class="row ico" href="'+r.url+'" target="_blank" style="color:inherit"><span class="badge" style="background:'+bg+'">'+ch+'</span><div class="main"><div class="t">'+esc(r.title.replace('🎬 ',''))+'</div><div class="s">'+ago(r.ended)+(r.started?' · '+dur(r.started,r.ended):'')+' · '+(r.conclusion==='success'?'завершён':r.conclusion==='cancelled'?'остановлен':'ошибка')+'</div></div><span class="v">›</span></a>'}).join('')
     :'<div class="empty">Запусков пока не было</div>';
 }
+
+
+// стримеры
+let LV=null;
+const pfb=p=>'<span class="pf '+p+'">'+(p==='kick'?'K':'T')+'</span>';
+const avaHtml=(x)=>'<div class="ava-wrap'+(x.live?' onair':'')+'"><img class="ava" src="'+esc(x.avatar||'')+'" alt="" onerror="this.style.visibility=\\'hidden\\'">'+pfb(x.p)+'</div>';
+async function loadLive(){LV=await api('/api/live');renderLive()}
+function renderLive(){if(!LV)return;
+  $('favs').innerHTML=LV.favs.length?LV.favs.map(f=>'<div class="row ico">'+avaHtml(f)+'<div class="main"><div class="t">'+esc(f.name||f.ch)+'</div><div class="s">'+
+    (f.unknown?'статус недоступен':f.live?'<span class="lv">● '+fmt(f.viewers)+'</span> · '+esc(f.game||'')+(f.title?' · '+esc(f.title):''):'офлайн')+'</div></div>'+
+    (f.running?'<span class="v" style="font-size:14px;color:var(--green)">режется</span>':(f.live||f.unknown?'<button class="btn sm" onclick="startFav(\\''+f.p+'\\',\\''+f.ch+'\\',this)">Резать</button>':''))+
+    '<div><div class="sw'+(f.auto?' on':'')+'" onclick="autoFav(\\''+f.p+'\\',\\''+f.ch+'\\',this)"></div><div class="swl">авто</div></div>'+
+    '<button class="x" title="Убрать" onclick="delFav(\\''+f.p+'\\',\\''+f.ch+'\\')">×</button></div>').join('')
+    :'<div class="empty" style="padding:22px">Добавь стримеров — увижу, кто в эфире</div>';
+  $('discover').innerHTML=LV.discover.length?LV.discover.map(d=>'<div class="scard"><img class="pv" src="'+esc(d.preview)+'" alt="" loading="lazy"><span class="vw">'+fmt(d.viewers)+'</span>'+
+    '<div class="b">'+avaHtml(d)+'<div class="main"><div class="t">'+esc(d.name)+'</div><div class="s">'+esc(d.title)+'</div></div></div>'+
+    '<div class="acts">'+(d.fav?'<button class="btn sm gray" disabled>★ В списке</button>':'<button class="btn sm gray" onclick="favD(\\''+d.p+'\\',\\''+d.ch+'\\',this)">＋ В список</button>')+
+    (d.running?'<button class="btn sm green" disabled>Режется</button>':'<button class="btn sm" onclick="startFav(\\''+d.p+'\\',\\''+d.ch+'\\',this)">Резать</button>')+'</div></div>').join('')
+    :'<div class="empty" style="width:100%">Сейчас никто не стримит CS2</div>';
+}
+async function addFav(){const r=await api('/api/fav',{url:$('fav-url').value});if(r.error)return toast(r.error);$('fav-url').value='';toast('★ Добавлен');loadLive()}
+$('fav-url').addEventListener('keydown',e=>{if(e.key==='Enter')addFav()});
+async function delFav(p,ch){if(!confirm('Убрать '+ch+' из списка?'))return;await api('/api/fav',{p,ch,action:'del'});loadLive()}
+async function favD(p,ch,b){b.disabled=true;await api('/api/fav',{p,ch});toast('★ '+ch+' в списке');loadLive()}
+async function autoFav(p,ch,el){const on=!el.classList.contains('on');el.classList.toggle('on',on);await api('/api/fav',{p,ch,action:'auto',auto:on});toast(on?'Авто включено для '+ch:'Авто выключено')}
+async function startFav(p,ch,b){b.disabled=true;b.textContent='…';const r=await api('/api/start',{p,ch,model:segv('seg-model'),mult:segv('seg-mult'),game:segv('seg-game')});
+  if(r.error){b.disabled=false;b.textContent='Резать';return toast(r.error)}toast('▶ '+r.channel+' запускается');setTimeout(()=>{refresh();loadLive()},3000)}
 
 // клипы
 async function act(c,body){const el=document.querySelector('[data-id="'+c.id+'"]');if(el){el.querySelector('video')?.pause();el.classList.add('out');setTimeout(()=>el.remove(),300)}
@@ -1228,6 +1393,6 @@ function drawChart(pts,A){
 
 function render(){if(!S)return;renderStatus();renderClips();renderSettings();if(TAB==='stats'&&ST)renderStats()}
 async function refresh(){S=await api('/api/state');render()}
-show(location.hash.slice(1)||'status');setTimeout(()=>{movePill();allInd()},300);refresh();setInterval(refresh,15000);
+show(location.hash.slice(1)||'status');setTimeout(()=>{movePill();allInd()},300);loadLive();setInterval(()=>{if(TAB==='status')loadLive()},60000);refresh();setInterval(refresh,15000);
 window.addEventListener('resize',()=>{if(TAB==='stats'&&ST)renderStats()});
 </script></body></html>`;

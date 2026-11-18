@@ -1,5 +1,5 @@
 name: ClipFarm — нарезка стрима
-run-name: "🎬 ${{ inputs.channel }} · ${{ inputs.owner }} (часть ${{ inputs.part }})"
+run-name: "🎬 ${{ inputs.channel }}${{ inputs.platform == 'kick' && ' [Kick]' || '' }} · ${{ inputs.owner }} (часть ${{ inputs.part }})"
 
 on:
   workflow_dispatch:
@@ -19,12 +19,15 @@ on:
       owner:
         description: 'Чей запуск (пользователь панели)'
         default: 'tim'
+      platform:
+        description: 'twitch / kick'
+        default: 'twitch'
       only_game:
         description: 'Резать только эту игру (пусто = любая)'
         default: 'Counter-Strike'
 
 concurrency:
-  group: clip-${{ inputs.owner }}-${{ inputs.channel }}
+  group: clip-${{ inputs.owner }}-${{ inputs.platform }}-${{ inputs.channel }}
   cancel-in-progress: false
 
 permissions:
@@ -68,7 +71,7 @@ jobs:
         run: |
           set +e
           python -u clipfarm.py --channel "$CH" --model "${{ inputs.model }}" --mult "${{ inputs.mult }}" \
-            --owner "${{ inputs.owner }}" --only-game "${{ inputs.only_game }}" --upload clips --max-hours 5.4 --offline-min 15 --quality "720p,720p60,best"
+            --owner "${{ inputs.owner }}" --platform "${{ inputs.platform }}" --only-game "${{ inputs.only_game }}" --upload clips --max-hours 5.4 --offline-min 15 --quality "720p,720p60,best"
           code=$?
           echo "code=$code" >> "$GITHUB_OUTPUT"
           [ $code -eq 3 ] && exit 0 || exit $code
@@ -76,4 +79,4 @@ jobs:
         if: steps.cut.outputs.code == '3'
         run: |
           gh workflow run clip.yml -f channel="$CH" -f model="${{ inputs.model }}" \
-            -f mult="${{ inputs.mult }}" -f owner="${{ inputs.owner }}" -f only_game="${{ inputs.only_game }}" -f part="$(( ${{ inputs.part }} + 1 ))"
+            -f mult="${{ inputs.mult }}" -f owner="${{ inputs.owner }}" -f only_game="${{ inputs.only_game }}" -f platform="${{ inputs.platform }}" -f part="$(( ${{ inputs.part }} + 1 ))"

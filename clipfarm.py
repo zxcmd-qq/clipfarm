@@ -71,12 +71,85 @@ class Chat(threading.Thread):
                                               ensure_ascii=False) + "\n")
                     self.log.flush()
 
+# ----------------------------------------------------------- kick
+def kick_info(slug):
+    """Данные канала Kick (chatroom id, эфир, категория). Kick за Cloudflare — пробуем «как браузер»."""
+    urls = [f"https://kick.com/api/v2/channels/{slug}", f"https://kick.com/api/v1/channels/{slug}"]
+    try:
+        from curl_cffi import requests as creq            # притворяется Chrome — Cloudflare обычно пускает
+        for u in urls:
+            r = creq.get(u, impersonate="chrome", timeout=20)
+            if r.status_code == 200:
+                return r.json()
+    except Exception as e:
+        print(f"[kick] curl_cffi: {e}", flush=True)
+    import urllib.request
+    for u in urls:
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
+                                                     "Accept": "application/json"})
+            return json.loads(urllib.request.urlopen(req, timeout=20).read())
+        except Exception as e:
+            print(f"[kick] {u}: {e}", flush=True)
+    return None
+
+class KickChat(threading.Thread):
+    """Чат Kick через их публичный Pusher-сокет (без аккаунта)."""
+    PUSHER = "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false"
+    def __init__(self, slug, log_path):
+        super().__init__(daemon=True)
+        self.slug = slug.lower()
+        self.log = open(log_path, "a", encoding="utf-8")
+        self.lock = threading.Lock()
+        self.buf = []
+
+    def take(self):
+        with self.lock:
+            out, self.buf = self.buf, []
+        return out
+
+    def run(self):
+        from websockets.sync.client import connect
+        room = None
+        while True:
+            try:
+                if not room:
+                    info = kick_info(self.slug) or {}
+                    room = (info.get("chatroom") or {}).get("id")
+                    if not room:
+                        print("[chat] не получил chatroom у Kick, пробую через минуту", flush=True)
+                        time.sleep(60); continue
+                with connect(self.PUSHER, open_timeout=20) as ws:
+                    ws.send(json.dumps({"event": "pusher:subscribe", "data": {"auth": "", "channel": f"chatrooms.{room}.v2"}}))
+                    print(f"[chat] подключен к kick/{self.slug}", flush=True)
+                    last_ping = time.time()
+                    while True:
+                        try:
+                            raw = ws.recv(timeout=30)
+                        except TimeoutError:
+                            ws.send(json.dumps({"event": "pusher:ping", "data": {}})); continue
+                        ev = json.loads(raw)
+                        if ev.get("event") == "pusher:ping":
+                            ws.send(json.dumps({"event": "pusher:pong", "data": {}}))
+                        if "ChatMessageEvent" in (ev.get("event") or ""):
+                            d = json.loads(ev.get("data") or "{}")
+                            txt = re.sub(r"\[emote:\d+:([^\]]+)\]", r"\1", d.get("content", ""))   # [emote:123:KEKW] → KEKW
+                            ts = time.time()
+                            with self.lock:
+                                self.buf.append((ts, txt))
+                            self.log.write(json.dumps({"t": ts, "u": (d.get("sender") or {}).get("username"), "m": txt}, ensure_ascii=False) + "\n")
+                            self.log.flush()
+            except Exception as e:
+                print(f"[chat] переподключение: {e}", flush=True)
+                time.sleep(5)
+
 # ----------------------------------------------------------- recorder
 class Recorder(threading.Thread):
     """Streamlink в .ts; если стрим оффлайн — ждёт и пробует снова."""
-    def __init__(self, channel, rec_dir, quality, rotate_min=60):
+    def __init__(self, channel, rec_dir, quality, rotate_min=60, platform="twitch"):
         super().__init__(daemon=True)
         self.channel, self.rec_dir, self.quality = channel, rec_dir, quality
+        self.url = f"https://kick.com/{channel}" if platform == "kick" else f"https://twitch.tv/{channel}"
         self.rotate = rotate_min * 60       # раз в час новый файл — старые удаляем
         self.pending = Counter()            # файл -> сколько клипов ещё режется
         self.last_live = time.time()
@@ -102,7 +175,7 @@ class Recorder(threading.Thread):
             name = time.strftime(f"{self.channel}_%Y%m%d_%H%M%S.ts")
             path = self.rec_dir / name
             cmd = ["streamlink", "--twitch-disable-ads", "--retry-open", "3",
-                   "-o", str(path), f"https://twitch.tv/{self.channel}",
+                   "-o", str(path), self.url,
                    self.quality]
             p = self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                              stderr=subprocess.DEVNULL)
@@ -410,8 +483,16 @@ def make_clip(job, args):
 
 # ---------------------------------------------------------------- game filter
 _game = {"t": 0, "name": ""}
-def game_ok(channel, want):
-    """Какая игра сейчас на стриме (Twitch GQL, без авторизации). Кэш 2 мин."""
+def game_ok(channel, want, platform="twitch"):
+    """Какая игра сейчас на стриме (Twitch GQL / Kick API, без авторизации). Кэш 2 мин."""
+    if platform == "kick":
+        if time.time() - _game["t"] > 120:
+            info = kick_info(channel)
+            if not info:
+                return True                      # Kick не ответил — не мешаем
+            cats = ((info.get("livestream") or {}).get("categories") or [])
+            _game.update(t=time.time(), name=" ".join(c.get("name", "") for c in cats))
+        return want.lower() in _game["name"].lower()
     if time.time() - _game["t"] > 120:
         import urllib.request
         try:
@@ -572,6 +653,7 @@ def main():
     ap.add_argument("--keep-work", action="store_true")
     ap.add_argument("--keep-rec", action="store_true", help="не удалять запись стрима после стопа")
     ap.add_argument("--font", default=os.environ.get("SUB_FONT", "Arial Black"))
+    ap.add_argument("--platform", default="twitch", choices=["twitch", "kick"])
     ap.add_argument("--only-game", default="", help="резать только когда на стриме эта игра (напр. Counter-Strike)")
     ap.add_argument("--owner", default="", help="владелец клипов (пользователь панели)")
     ap.add_argument("--upload", default="", help="имя GitHub-релиза для заливки клипов (облако)")
@@ -587,8 +669,8 @@ def main():
 
     ch = args.channel.lower()
     rec_dir = Path(args.rec); rec_dir.mkdir(exist_ok=True)
-    chat = Chat(ch, rec_dir / f"{ch}_chat.jsonl"); chat.start()
-    rec = Recorder(ch, rec_dir, args.quality); rec.start()
+    chat = (KickChat if args.platform == "kick" else Chat)(ch, rec_dir / f"{ch}_chat.jsonl"); chat.start()
+    rec = Recorder(ch, rec_dir, args.quality, platform=args.platform); rec.start()
     det = Detector(mult=args.mult, min_msgs=args.min_msgs, cooldown=args.cooldown)
     q = queue.Queue(); threading.Thread(target=cutter_worker, args=(q, args, rec), daemon=True).start()
     t_start, exit_code = time.time(), 0
@@ -620,7 +702,7 @@ def main():
             spike, score = det.feed(msgs, now)
             print(f"[{time.strftime('%H:%M:%S')}] сообщений за {args.bucket}с: "
                   f"{len(msgs):3d}  score {score:5.1f}" + ("  🔥 ВСПЛЕСК" if spike else ""), flush=True)
-            if spike and args.only_game and not game_ok(ch, args.only_game):
+            if spike and args.only_game and not game_ok(ch, args.only_game, args.platform):
                 print(f"[game] сейчас не {args.only_game} — клип пропущен", flush=True)
                 spike = False
             if spike:

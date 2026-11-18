@@ -2,3 +2,5 @@ streamlink
 numpy
 opencv-python-headless
 faster-whisper
+websockets>=12
+curl_cffi
