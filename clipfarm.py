@@ -664,6 +664,8 @@ def main():
     ap.add_argument("--max-hours", type=float, default=0, help="выйти через N часов (код 3, если стрим ещё идёт)")
     ap.add_argument("--offline-min", type=float, default=0, help="выйти, если стрим оффлайн N минут")
     args = ap.parse_args()
+    if args.only_game.strip().lower() in ("", "any", "all", "любая"):
+        args.only_game = ""                 # фильтр игры выключен
 
     for tool in ("ffmpeg", "ffprobe", "streamlink"):
         if not shutil.which(tool):

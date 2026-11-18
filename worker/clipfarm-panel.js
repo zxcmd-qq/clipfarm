@@ -734,7 +734,7 @@ async function dispatchClip(env, owner, p, ch, opts = {}) {
   const game = (await settings(env, owner)).game;
   return gh(env, `/actions/workflows/${WF}/dispatches`, { method: 'POST',
     body: JSON.stringify({ ref: 'main', inputs: { channel: ch, platform: p, owner, model: opts.model || 'medium', mult: String(opts.mult || '2.5'),
-      only_game: game, part: '1' } }) });
+      only_game: game || 'any', part: '1' } }) });   // пустую строку GitHub заменяет на дефолт (CS2), поэтому 'any'
 }
 
 // крон каждые 5 минут: у кого включено «Авто» и стример вышел в эфир с CS2 — запускаем нарезку
