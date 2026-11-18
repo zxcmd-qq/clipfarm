@@ -48,9 +48,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: '3.12'
-          cache: pip
+      # всё тяжёлое ставится один раз и дальше берётся из кэша (~20 с вместо 2–3 мин)
+      - name: Кэш библиотек Python
+        id: venv
+        uses: actions/cache@v4
+        with:
+          path: ~/venv
+          key: venv-${{ steps.py.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
+      - name: Кэш ffmpeg и шрифта
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: ffmpeg fonts-montserrat
+          version: '1'
       - name: Кэш моделей Whisper и детектора лиц
         uses: actions/cache@v4
         with:
@@ -60,17 +72,19 @@ jobs:
           key: models-v1
       - name: Установка
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-montserrat > /dev/null
-          pip install -q -r requirements.txt
-          fc-list | grep -i "montserrat" | head -2 || true
+          if [ "${{ steps.venv.outputs.cache-hit }}" != "true" ]; then
+            python -m venv ~/venv
+            ~/venv/bin/pip install -q -r requirements.txt
+          fi
+          echo "$HOME/venv/bin" >> "$GITHUB_PATH"
+          fc-cache -f > /dev/null 2>&1 || true
       - name: Релиз для клипов
         run: gh release view clips >/dev/null 2>&1 || gh release create clips -t "Клипы" -n "Сюда падают готовые нарезки. Решения — в панели."
       - name: Нарезка (до 5,5 ч)
         id: cut
         run: |
           set +e
-          python -u clipfarm.py --channel "$CH" --model "${{ inputs.model }}" --mult "${{ inputs.mult }}" \
+          ~/venv/bin/python -u clipfarm.py --channel "$CH" --model "${{ inputs.model }}" --mult "${{ inputs.mult }}" \
             --owner "${{ inputs.owner }}" --platform "${{ inputs.platform }}" --only-game "${{ inputs.only_game }}" --upload clips --max-hours 5.4 --offline-min 15 --quality "720p,720p60,best"
           code=$?
           echo "code=$code" >> "$GITHUB_OUTPUT"

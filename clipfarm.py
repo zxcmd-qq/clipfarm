@@ -453,9 +453,10 @@ def make_clip(job, args):
         run(["ffmpeg", "-y", "-i", str(raw), "-vn", "-ac", "1", "-ar", "16000", str(wav)])
         words = transcribe(wav, args.model, args.lang)
     if words:
-        make_ass(words, work / "subs.ass", margin_v=1920 - sub_bottom, font=args.font,
+        family, fdir = fetch_font(args)     # свой шрифт пользователя из настроек панели
+        make_ass(words, work / "subs.ass", margin_v=1920 - sub_bottom, font=family or args.font,
                  center_y=CAM_H if layout == "cam" else None)
-        vf += f"[{last}]ass=subs.ass[v]"
+        vf += f"[{last}]ass=subs.ass" + (f":fontsdir={fdir}" if fdir else "") + "[v]"
     else:
         vf += f"[{last}]null[v]"
 
@@ -509,8 +510,49 @@ def game_ok(channel, want, platform="twitch"):
             return True                      # не знаем — не мешаем
     return want.lower() in _game["name"].lower()
 
-# ---------------------------------------------------------------- banners
+# ---------------------------------------------------------------- banners / fonts
 API = os.environ.get("CLIPFARM_API", "https://clipfarm.osttima.workers.dev")
+
+def _pub(path):
+    import urllib.request
+    req = urllib.request.Request(f"{API}{path}", headers={"User-Agent": "clipfarm-runner"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read() or b"{}")
+
+_font_cache = {}
+def fetch_font(args):
+    """Свой шрифт из Настроек панели: качаем из релиза fonts, имя семейства берём через fc-scan."""
+    if not args.owner:
+        return None, None
+    try:
+        info = _pub(f"/pub/font/{args.owner}")
+    except Exception as e:
+        print(f"[font] панель не ответила: {e}", flush=True)
+        return None, None
+    asset = info.get("asset")
+    if not asset:
+        return None, None
+    if asset in _font_cache:
+        return _font_cache[asset]
+    fdir = Path.home() / ".cache" / "clipfarm" / "fonts" / args.owner
+    fdir.mkdir(parents=True, exist_ok=True)
+    for old in fdir.iterdir():
+        if old.name != asset:
+            old.unlink()
+    local = fdir / asset
+    if not local.exists() or local.stat().st_size != info.get("size"):
+        r = subprocess.run(["gh", "release", "download", "fonts", "-p", asset, "-D", str(fdir), "--clobber"],
+                           capture_output=True, text=True)
+        if r.returncode or not local.exists():
+            print(f"[font] не скачался {asset}: {r.stderr[-200:]}", flush=True)
+            return None, None
+    fam = subprocess.run(["fc-scan", "--format", "%{family[0]}", str(local)], capture_output=True, text=True).stdout.strip()
+    if not fam:
+        print("[font] не смог прочитать название шрифта — беру стандартный", flush=True)
+        return None, None
+    print(f"[font] свой шрифт: {fam}", flush=True)
+    _font_cache[asset] = (fam, str(fdir))
+    return fam, str(fdir)
 
 def fetch_banner(args):
     """Какой баннер сейчас включён у владельца (спрашиваем панель), качаем из релиза banners."""
@@ -518,9 +560,7 @@ def fetch_banner(args):
         return None
     import urllib.request
     try:
-        req = urllib.request.Request(f"{API}/pub/banner/{args.owner}", headers={"User-Agent": "clipfarm-runner"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            info = json.loads(r.read() or b"{}")
+        info = _pub(f"/pub/banner/{args.owner}")
     except Exception as e:
         print(f"[banner] панель не ответила: {e}", flush=True)
         return None

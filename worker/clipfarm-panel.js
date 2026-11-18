@@ -70,11 +70,31 @@ const cookieFor = async (env, id) => {
   const c = await cred(env, id);
   return `cf_auth=${id}.${await hmac(env, 'u:' + id + ':' + (c?.v || 0))}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000`;
 };
+// ---------------- админ и технические работы
+const ADMIN = env => env.ADMIN || 'tim';
+const isMaint = async env => !!(env.KV && await env.KV.get('maint'));
+const MAINT_MSG = '🛠 Технические работы. Скоро всё заработает — подожди немного.';
+
+async function setMaint(env, on) {
+  if (!on) { await env.KV.delete('maint'); return { ok: true, maint: false }; }
+  await env.KV.put('maint', new Date().toISOString());
+  // стопаем все нарезки, кроме админских
+  const runs = await activeRuns(env);
+  let stopped = 0;
+  for (const r of runs) {
+    const owner = (r.display_title || '').match(/ · ([a-z0-9_]+) \(/)?.[1];
+    if (owner && owner !== ADMIN(env)) { await gh(env, `/actions/runs/${r.id}/cancel`, { method: 'POST' }); stopped++; }
+  }
+  return { ok: true, maint: true, stopped };
+}
+
 async function whoami(env, req) {
   const m = (req.headers.get('Cookie') || '').match(/cf_auth=([a-z0-9_]+)\.([0-9a-f]{32})/);
   if (!m || !users(env)[m[1]]) return null;
   const c = await cred(env, m[1]);
-  return (await hmac(env, 'u:' + m[1] + ':' + (c?.v || 0))) === m[2] ? m[1] : null;
+  if ((await hmac(env, 'u:' + m[1] + ':' + (c?.v || 0))) !== m[2]) return null;
+  if (m[1] !== ADMIN(env) && await isMaint(env)) return null;      // на техработах пускаем только админа
+  return m[1];
 }
 async function changeAccount(env, me, b) {
   if (!env.KV) return { error: 'Нет KV' };
@@ -148,7 +168,7 @@ async function state(env, me) {
   const clips = assets.map(a => ({ id: a.id, name: a.name, label: a.label || '', size: a.size, created: a.created_at, ...parseName(env, a.name) }))
     .filter(c => c.owner === me).sort((a, b) => b.created.localeCompare(a.created));
   return {
-    me, login: (await cred(env, me))?.login || me, settings: await settings(env, me), active, recent, banner,
+    me, admin: me === ADMIN(env), maint: await isMaint(env), login: (await cred(env, me))?.login || me, settings: await settings(env, me), active, recent, banner,
     fresh: clips.filter(c => c.stage === 'fresh'),
     approved: clips.filter(c => c.stage === 'approved').reverse(),       // очередь: старые первыми
     posted: clips.filter(c => c.stage === 'posted').slice(0, 30),
@@ -242,6 +262,32 @@ async function ownerByChat(env, chat) {
 const TR = { а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',л:'l',м:'m',н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'h',ц:'c',ч:'ch',ш:'sh',щ:'sch',ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya' };
 const bannerName = s => String(s || '').trim().split('').map(ch => { const l = ch.toLowerCase(); return TR[l] !== undefined ? (ch === l ? TR[l] : TR[l].charAt(0).toUpperCase() + TR[l].slice(1)) : ch; })
   .join('').replace(/\s+/g, '_').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+
+// ---------------- свой шрифт субтитров: релиз "fonts", файл <user>__<имя>.ttf|otf
+async function fontRelease(env) {
+  let r = await gh(env, '/releases/tags/fonts');
+  if (r.status === 404) r = await gh(env, '/releases', { method: 'POST', body: JSON.stringify({ tag_name: 'fonts', name: 'Шрифты', body: 'Шрифты субтитров пользователей ClipFarm' }) });
+  return r.ok ? r.json() : null;
+}
+async function myFont(env, owner) {
+  const rel = await fontRelease(env);
+  const a = (rel?.assets || []).find(x => x.name.startsWith(owner + '__'));
+  return a ? { id: a.id, asset: a.name, size: a.size, name: a.name.slice(owner.length + 2) } : null;
+}
+async function uploadFont(env, owner, req, fname) {
+  const ext = (String(fname).match(/\.(ttf|otf)$/i) || [])[1];
+  if (!ext) return { error: 'Нужен файл .ttf или .otf' };
+  const size = Number(req.headers.get('Content-Length') || 0);
+  if (!size || size > 15e6) return { error: 'Файл пустой или больше 15 МБ' };
+  const rel = await fontRelease(env);
+  if (!rel) return { error: 'Нет доступа к GitHub' };
+  const old = await myFont(env, owner);
+  if (old) await gh(env, `/releases/assets/${old.id}`, { method: 'DELETE' });
+  const safe = String(fname).replace(/[^\w.-]+/g, '_').slice(-60);
+  const up = await gh(env, `https://uploads.github.com/repos/${env.GH_REPO}/releases/${rel.id}/assets?name=${encodeURIComponent(owner + '__' + safe)}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(size) }, body: req.body });
+  return up.ok ? { ok: true, name: safe } : { error: 'GitHub не принял файл: ' + up.status };
+}
 
 async function bannerRelease(env) {
   let r = await gh(env, '/releases/tags/banners');
@@ -433,6 +479,7 @@ async function tgHook(env, req, ctx) {
     return new Response('ok');
   }
   const owner = await ownerByChat(env, m.chat.id);
+  if (owner && owner !== ADMIN(env) && await isMaint(env)) { await say(MAINT_MSG); return new Response('ok'); }
   if (!owner) { await say('Подключи бота из панели ClipFarm: «Мои аккаунты» → Telegram → Подключить.'); return new Response('ok'); }
   try {
     if (m.video || m.animation || m.document) await say(await saveBanner(env, owner, m));
@@ -741,7 +788,9 @@ async function dispatchClip(env, owner, p, ch, opts = {}) {
 async function autoStart(env) {
   const runs = await activeRuns(env);
   const titles = runs.map(r => r.display_title || '');
+  const maint = await isMaint(env);
   for (const u of Object.keys(users(env))) {
+    if (maint && u !== ADMIN(env)) continue;
     const favs = ((await kvGet(env, `fav:${u}`)) || []).filter(f => f.auto);
     if (!favs.length) continue;
     const tw = await twitchLive(favs.filter(f => f.p === 'twitch').map(f => f.ch));
@@ -766,7 +815,8 @@ export default {
   async scheduled(event, env, ctx) {
     env_global = env;
     if (event.cron && event.cron.startsWith('*/')) { ctx.waitUntil(autoStart(env).catch(e => console.log('auto', e.message))); return; }
-    ctx.waitUntil((async () => { for (const u of Object.keys(users(env))) {
+    ctx.waitUntil((async () => { const maint = await isMaint(env); for (const u of Object.keys(users(env))) {
+      if (maint && u !== ADMIN(env)) continue;
       try { await publishNext(env, u); } catch (e) {}
       try { await refreshStats(env, u); } catch (e) {}
     } })());
@@ -779,6 +829,7 @@ export default {
     if (url.pathname === '/login' && req.method === 'POST') {
       const f = await req.formData();
       const user = await checkLogin(env, f.get('login'), f.get('pass') || '');
+      if (user && user !== ADMIN(env) && await isMaint(env)) return html(LOGIN.replace('<!--err-->', '<p class="maint">' + MAINT_MSG + '</p>'), 503);
       if (user) return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': await cookieFor(env, user) } });
       return html(LOGIN.replace('<!--err-->', '<p class="err">Неверный логин или пароль</p>'), 401);
     }
@@ -789,6 +840,8 @@ export default {
       const b = await req.json().catch(() => ({}));
       return json(env.KV ? await notifyClip(env, b.name) : { error: 'kv' });
     }
+    const pf = url.pathname.match(/^\/pub\/font\/([a-z0-9_]+)$/);
+    if (pf) { const f = await myFont(env, pf[1]); return json(f ? { asset: f.asset, size: f.size } : {}); }
     const pb = url.pathname.match(/^\/pub\/banner\/([a-z0-9_]+)$/);
     if (pb) {                                           // нарезчик спрашивает, какой баннер вставлять
       const name = env.KV ? await env.KV.get(`banner:${pb[1]}`) : null;
@@ -802,7 +855,7 @@ export default {
     const me = await whoami(env, req);
     if (!me) {
       if (url.pathname.startsWith('/api') || url.pathname.startsWith('/v/')) return json({ error: 'auth' }, 401);
-      return html(LOGIN);
+      return html(await isMaint(env) ? LOGIN.replace('<!--err-->', '<p class="maint">' + MAINT_MSG + '</p>') : LOGIN);
     }
 
     if (url.pathname === '/') return html(PAGE);
@@ -815,6 +868,18 @@ export default {
     if (url.pathname === '/tg/connect') return tgConnect(env, me);
     if (url.pathname === '/api/state') return json(await state(env, me));
     if (url.pathname === '/api/live') return json(await liveState(env, me));
+    if (url.pathname === '/api/font' && req.method === 'GET') return json(await myFont(env, me) || {});
+    if (url.pathname === '/api/font' && req.method === 'PUT') return json(await uploadFont(env, me, req, url.searchParams.get('name') || ''));
+    if (url.pathname === '/api/font' && req.method === 'DELETE') {
+      const f = await myFont(env, me); if (f) await gh(env, `/releases/assets/${f.id}`, { method: 'DELETE' });
+      return json({ ok: true });
+    }
+    if (url.pathname === '/myfont') {                    // для превью в настройках
+      const f = await myFont(env, me);
+      if (!f) return new Response('no', { status: 404 });
+      const r = await gh(env, `/releases/assets/${f.id}`, { headers: { Accept: 'application/octet-stream' } });
+      return new Response(r.body, { headers: { 'Content-Type': f.name.toLowerCase().endsWith('.otf') ? 'font/otf' : 'font/ttf', 'Cache-Control': 'private, max-age=600' } });
+    }
     if (url.pathname === '/api/stats') {
       let st = await kvGet(env, `stats:${me}`);
       if (!st || url.searchParams.get('refresh') || Date.now() - new Date(st.updated) > 3 * 3600e3) st = await refreshStats(env, me);
@@ -864,6 +929,10 @@ export default {
         return json({ ok: r.status === 204 });
       }
       if (url.pathname === '/api/publish') return json(await publishNext(env, me));
+      if (url.pathname === '/api/maint') {
+        if (me !== ADMIN(env)) return json({ error: 'только для админа' }, 403);
+        return json(await setMaint(env, !!b.on));
+      }
       if (url.pathname === '/api/settings') {
         const cur = await settings(env, me);
         if ('game' in b) cur.game = b.game ? GAME_DEFAULT : '';
@@ -929,6 +998,7 @@ h1{font-size:28px;text-align:center;margin:0 0 6px;font-weight:700}.sub{color:va
 .group{background:var(--card);border-radius:12px;overflow:hidden;margin-bottom:16px}
 .group label{display:flex;align-items:center;min-height:48px;padding:0 16px}.group label+label{border-top:.5px solid var(--sep)}
 .group span{width:84px;color:var(--label)}.group input{flex:1}
+.maint{background:color-mix(in srgb,var(--orange) 18%,transparent);border:1px solid color-mix(in srgb,var(--orange) 45%,transparent);color:var(--label);padding:12px 14px;border-radius:14px;font-size:15px;text-align:center;margin-top:14px}
 /* ===== Liquid Glass ===== */
 :root{--glass:rgba(255,255,255,.58);--glass2:rgba(255,255,255,.72);--rim:rgba(255,255,255,.75);--rim2:rgba(255,255,255,.18);--shadow:0 8px 32px rgba(31,38,135,.10),0 1px 2px rgba(0,0,0,.04);--blur:saturate(190%) blur(26px);
   --ease:cubic-bezier(.2,.9,.25,1);--spring:cubic-bezier(.34,1.56,.64,1)}
@@ -1224,9 +1294,23 @@ h1.title{animation:enter .6s var(--ease) both}
   <div class="group"><div class="row ico"><span class="badge" style="background:#ff9500">🎯</span><div class="main"><div class="t">Только CS2</div><div class="s" id="game-sub"></div></div>
     <div class="sw" id="game-sw" onclick="toggleGame(this)"></div></div></div>
   <div class="foot">Один переключатель на весь аккаунт: действует и на ручной запуск, и на «Авто». Нарезки, которые уже идут, подхватят его при следующем запуске. Если стример 15 минут не в CS2 — нарезка выключится, а «Авто» включит её снова, когда он вернётся.</div>
+  <div class="sec">Шрифт субтитров</div>
+  <div class="group">
+    <div class="row ico"><span class="badge" style="background:#5856d6">Aa</span><div class="main"><div class="t" id="font-name">Стандартный (Montserrat Black)</div><div class="s">.ttf или .otf, до 15 МБ</div></div>
+      <label class="btn sm" style="cursor:pointer">Загрузить<input type="file" accept=".ttf,.otf,font/ttf,font/otf" id="font-file" style="display:none" onchange="uploadFont(this)"></label></div>
+    <div class="row" id="font-prev-row" style="justify-content:center;min-height:90px;display:none"><div id="font-prev" style="font-size:34px;color:#fff;text-transform:uppercase;-webkit-text-stroke:6px #000;paint-order:stroke fill;text-align:center;line-height:1.1">Он это сделал</div></div>
+    <div class="row hide" id="font-del-row" style="justify-content:center"><button style="color:var(--red)" onclick="delFont()">Вернуть стандартный</button></div>
+  </div>
+  <div class="foot">Шрифт применится к новым клипам — для уже идущих нарезок перезапусти их. Нужна кириллица, иначе русские буквы будут стандартным шрифтом.</div>
   <div class="sec">Баннер</div>
   <div class="group"><div class="row ico"><span class="badge" style="background:#af52de">🎞</span><div class="main"><div class="t" id="banner-now"></div><div class="s">Управление в боте: /banner</div></div></div></div>
   <div class="foot">Пришли боту видео на зелёном фоне — он спросит название. Потом <b>/banner Имя</b> — и баннер будет посередине каждого нового клипа. <b>/banner stop</b> — выключить.</div>
+  <div id="admin-box" class="hide">
+  <div class="sec">Админ</div>
+  <div class="group"><div class="row ico"><span class="badge" id="maint-badge" style="background:#ff9500">🛠</span><div class="main"><div class="t" id="maint-t"></div><div class="s" id="maint-s"></div></div></div>
+    <div class="row"><button class="btn block" id="maint-btn" onclick="toggleMaint(this)"></button></div></div>
+  <div class="foot">Технические работы: у всех, кроме тебя, останавливаются нарезки, их выкидывает из панели, войти нельзя — показывается «технические работы». Автозапуск и постинг у них на паузе. «В прод» — всё снова работает.</div>
+  </div>
   <div class="sec">Профиль</div>
   <div class="group">
     <div class="row"><span style="width:110px">Логин</span><input id="f-login" autocapitalize="none" autocomplete="username"></div>
@@ -1260,7 +1344,7 @@ function allInd(){document.querySelectorAll('.seg').forEach(segInd)}
 function show(t){const prev=TAB;TAB=['status','clips','stats','settings'].includes(t)?t:'status';
   document.querySelectorAll('.nav a').forEach(a=>a.classList.toggle('on',a.dataset.t===TAB));movePill();
   document.querySelectorAll('main>section').forEach(s=>{const on=s.id==='v-'+TAB;s.classList.toggle('hide',!on);if(on){s.classList.remove('enter');void s.offsetWidth;s.classList.add('enter')}});
-  if(TAB==='stats')loadStats();render();requestAnimationFrame(allInd);window.scrollTo({top:0,behavior:prev===TAB?'smooth':'instant'})}
+  if(TAB==='stats')loadStats();if(TAB==='settings')loadFont();render();requestAnimationFrame(allInd);window.scrollTo({top:0,behavior:prev===TAB?'smooth':'instant'})}
 window.addEventListener('resize',()=>{movePill();allInd()});
 window.addEventListener('hashchange',()=>show(location.hash.slice(1)));
 function seg(id,cb){const el=$(id);segInd(el);el.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;el.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));segInd(el);cb&&cb(b.dataset.v)})}
@@ -1349,11 +1433,26 @@ function renderSettings(){
   const A=S.accounts, row=(p,name,bg,ico,a,extra)=>'<div class="row ico"><span class="badge" style="background:'+bg+'">'+ico+'</span><div class="main"><div class="t">'+name+'</div><div class="s">'+(a?'✓ '+esc(a.name):'не подключён')+(extra||'')+'</div></div>'+
     (a?'<button style="color:var(--red);font-size:15px" onclick="disc(\\''+p+'\\')">Отключить</button>':(S.oauth[p]&&S.kv?'<a class="btn sm" href="'+(p==='telegram'?'/tg/connect" target="_blank':'/oauth/'+p+'/start')+'">Подключить</a>':'<span class="v" style="font-size:14px">не настроено</span>'))+'</div>';
   $('accts').innerHTML=row('youtube','YouTube Shorts','#ff0000','▶',A.youtube)+row('tiktok','TikTok','#000','♪',A.tiktok,A.tiktok&&!A.tiktok.stats?' · <a href="/oauth/tiktok/start?stats=1">включить статистику</a>':'')+row('telegram','Telegram-бот','#2aabee','✈',A.telegram);
-  $('banner-now').textContent=S.banner?'Включён: '+S.banner:'Выключен';
+  $('banner-now').textContent=S.banner?'Включён: '+S.banner:'Выключен';renderAdmin();
   const g=!!S.settings?.game;$('game-sw').classList.toggle('on',g);$('game-sub').textContent=g?'клипы только когда стример в Counter-Strike':'любая игра';
   $('game-chip').innerHTML=g?'🎯 Только CS2 · <a href="#settings">изменить</a>':'🎮 Любая игра · <a href="#settings">изменить</a>';
   if(document.activeElement!==$('f-login')&&!$('f-login').value)$('f-login').value=S.login;
 }
+async function loadFont(){const f=await api('/api/font');const has=!!f.asset;
+  $('font-name').textContent=has?f.name:'Стандартный (Montserrat Black)';$('font-del-row').classList.toggle('hide',!has);$('font-prev-row').style.display='flex';
+  if(has){const ff=new FontFace('userfont','url(/myfont?'+f.size+')');try{await ff.load();document.fonts.add(ff);$('font-prev').style.fontFamily='userfont'}catch(e){$('font-prev').style.fontFamily=''}}
+  else $('font-prev').style.fontFamily='"Montserrat","Arial Black",sans-serif'}
+async function uploadFont(inp){const f=inp.files[0];if(!f)return;toast('Загружаю шрифт…');
+  const r=await fetch('/api/font?name='+encodeURIComponent(f.name),{method:'PUT',body:f}).then(r=>r.json());inp.value='';
+  if(r.error)return toast(r.error);toast('✅ Шрифт загружен: '+r.name);loadFont()}
+async function delFont(){if(!confirm('Вернуть стандартный шрифт?'))return;await fetch('/api/font',{method:'DELETE'});toast('Стандартный шрифт');loadFont()}
+function renderAdmin(){if(!S)return;$('admin-box').classList.toggle('hide',!S.admin);if(!S.admin)return;
+  $('maint-t').textContent=S.maint?'Идут технические работы':'Всё работает (прод)';$('maint-s').textContent=S.maint?'остальные не могут войти, нарезки на паузе':'все пользователи в работе';
+  $('maint-badge').style.background=S.maint?'#ff9500':'#34c759';$('maint-badge').textContent=S.maint?'🛠':'✓';
+  const b=$('maint-btn');b.textContent=S.maint?'🚀 В прод':'🛠 Технические работы';b.className='btn block '+(S.maint?'green':'red')}
+async function toggleMaint(btn){const on=!S.maint;if(on&&!confirm('Остановить все нарезки у остальных и выкинуть их из панели?'))return;btn.disabled=true;
+  const r=await api('/api/maint',{on});btn.disabled=false;if(r.error)return toast(r.error);S.maint=r.maint;renderAdmin();
+  toast(r.maint?'🛠 Тех. работы: остановлено нарезок — '+r.stopped:'🚀 Прод: всё снова работает')}
 async function toggleGame(el){const on=!el.classList.contains('on');el.classList.toggle('on',on);const r=await api('/api/settings',{game:on});S.settings=r.settings;renderSettings();toast(on?'🎯 Только CS2 — для всех запусков':'🎮 Любая игра — для всех запусков')}
 async function saveAccount(btn){btn.disabled=true;const r=await api('/api/account',{login:$('f-login').value,password:$('f-pass').value,current:$('f-cur').value});btn.disabled=false;
   $('acc-msg').innerHTML=r.ok?'<span style="color:var(--green)">✓ Сохранено. Логин: '+esc(r.login)+'</span>':'<span class="err">'+esc(r.error)+'</span>';if(r.ok){$('f-pass').value='';$('f-cur').value='';refresh()}}
