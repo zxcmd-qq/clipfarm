@@ -270,8 +270,9 @@ def ass_time(t):
     h, t = divmod(max(t, 0), 3600); m, s = divmod(t, 60)
     return f"{int(h)}:{int(m):02d}:{s:05.2f}"
 
-def make_ass(words, path, per_line=3, margin_v=560, font="Arial Black"):
+def make_ass(words, path, per_line=3, margin_v=560, font="Arial Black", center_y=None):
     # margin_v — отступ низа субтитров от низа кадра (выше подписи TikTok)
+    # center_y — если задан, центр субтитров ставится ровно на эту высоту (стык вебки и игры)
     head = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -285,11 +286,12 @@ Style: Main,FONT,80,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
+    pos = f"{{\\an5\\pos(540,{int(center_y)})}}" if center_y else ""
     for i in range(0, len(words), per_line):
         chunk = words[i:i + per_line]
         txt = censor(" ".join(w for _, _, w in chunk)).upper().replace("{", "").replace("}", "")
         lines.append(f"Dialogue: 0,{ass_time(chunk[0][0])},{ass_time(chunk[-1][1])},"
-                     f"Main,,0,0,0,,{txt}")
+                     f"Main,,0,0,0,,{pos}{txt}")
     head = head.replace("MARGIN", str(int(margin_v))).replace("FONT", font)
     path.write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
 
@@ -451,7 +453,8 @@ def make_clip(job, args):
         run(["ffmpeg", "-y", "-i", str(raw), "-vn", "-ac", "1", "-ar", "16000", str(wav)])
         words = transcribe(wav, args.model, args.lang)
     if words:
-        make_ass(words, work / "subs.ass", margin_v=1920 - sub_bottom, font=args.font)
+        make_ass(words, work / "subs.ass", margin_v=1920 - sub_bottom, font=args.font,
+                 center_y=CAM_H if layout == "cam" else None)
         vf += f"[{last}]ass=subs.ass[v]"
     else:
         vf += f"[{last}]null[v]"
